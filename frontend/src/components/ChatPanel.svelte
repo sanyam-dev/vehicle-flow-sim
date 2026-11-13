@@ -8,7 +8,9 @@
   const CHIPS = ['Rush hour at Silk Board Junction, Bengaluru at 9am',
                  'Close lane 0 of Hosur Road',
                  'Night traffic at Silk Board Junction, Bengaluru at 11pm'];
+  const SLOW_MS = 6000; // after this, explain that the LLM may be starting up
   let draft = $state('');
+  let slow = $state(false);
   let log;
 
   /** Minimal, safe markdown: escape HTML then render **bold** and *italic*. */
@@ -28,6 +30,7 @@
       return;
     }
     app.chatBusy = true;
+    const timer = setTimeout(() => { slow = true; }, SLOW_MS);
     try {
       const history = app.chat.map(({ role, content }) => ({ role, content }));
       const r = await api.chat(history, { ...app.params, ...app.edits });
@@ -36,6 +39,8 @@
     } catch (err) {
       app.chat.push({ role: 'assistant', content: `Sorry, the agent failed: ${err.message}` });
     } finally {
+      clearTimeout(timer);
+      slow = false;
       app.chatBusy = false;
     }
   }
@@ -68,7 +73,11 @@
         {#each CHIPS as c}<button class="chip" onclick={() => send(c)}>{c}</button>{/each}
       </div>
     {/if}
-    {#if app.chatBusy}<div class="msg assistant typing">…</div>{/if}
+    {#if app.chatBusy}
+      <div class="msg assistant typing">
+        {slow ? 'Waking up the language model. After a quiet spell the first reply can take up to 2 minutes…' : '…'}
+      </div>
+    {/if}
     {#if app.proposal}
       <button class="btn primary run" onclick={runProposal}>Run this simulation</button>
     {/if}

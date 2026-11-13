@@ -88,6 +88,8 @@ export const api = {
    * @param {object} [params] current RunRequest form values (agent context)
    */
   chat: (messages, params) => request('/chat', { messages, params }),
+  /** Start the chat LLM in the background; resolves to {warming}. */
+  warm: () => request('/llm/warm', {}),
   /** @param {object} req RunRequest body; resolves to {id} */
   createRun: (req) => request('/runs', req),
   run: (id) => request(`/runs/${id}`),

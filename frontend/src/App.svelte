@@ -1,10 +1,11 @@
 <script>
   // App shell: header, left column (chat + parameters), centre (map +
   // playback), right column (metrics). Detects the backend on start-up and
-  // falls back to the bundled demo replay when it is unreachable.
+  // falls back to the bundled demo replay when it is unreachable. Also wakes
+  // the chat LLM so its cold start overlaps with the user typing.
   import { onMount } from 'svelte';
   import { app } from './lib/store.svelte.js';
-  import { detectBackend } from './lib/api.js';
+  import { api, detectBackend } from './lib/api.js';
   import { openDemo, openRun, runFromHash } from './lib/runs.js';
   import Header from './components/Header.svelte';
   import ChatPanel from './components/ChatPanel.svelte';
@@ -16,6 +17,8 @@
   onMount(async () => {
     const live = await detectBackend();
     app.backend = live ? 'live' : 'demo';
+    // Wake the chat LLM now: a cold GPU needs ~2 min, mostly hidden while the user types.
+    if (live) api.warm().catch(() => {});
     const id = runFromHash();
     if (!live) await openDemo();
     else if (id) await openRun(id);

@@ -192,6 +192,7 @@ def execute(run_id: str, request: dict) -> None:
     from app.api.schemas import RunRequest
     from app.geo.geocoder import resolve_area
     from app.geo.graph_builder import load_or_build
+    from app.geo.overpass import OverpassUnavailable
     from app.runs import store
     from app.runs.export import network_geojson
     from app.sim.engine import SimConfig
@@ -205,7 +206,7 @@ def execute(run_id: str, request: dict) -> None:
         store.set_status(run_id, "running", "geocoding")
         area = resolve_area(req.place)
         store.set_status(run_id, "running", "loading road network")
-        G = load_or_build(area)
+        G = load_or_build(area, on_stage=lambda s: store.set_status(run_id, "running", s))
         Gs = _scenario_graph(G, req)
         net = compile_network(Gs if Gs is not None else G)
         origin = FrameRecorder(net, None).origin
@@ -219,6 +220,8 @@ def execute(run_id: str, request: dict) -> None:
         result["info"]["area"] = area.name
         store.write_json(d / "result.json", result)
         store.set_status(run_id, "done")
+    except OverpassUnavailable as exc:  # expected when OSM servers are down: plain message
+        store.set_status(run_id, "error", error=str(exc))
     except Exception as exc:  # report any failure to the UI instead of dying silently
         traceback.print_exc()
         store.set_status(run_id, "error", error=f"{type(exc).__name__}: {exc}")

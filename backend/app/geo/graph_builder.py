@@ -11,34 +11,26 @@ graph attribute `signals` and match them to junctions later.
 
 import json
 import logging
-import time
+import tempfile
+from pathlib import Path
 
 import networkx as nx
 import osmnx as ox
 from pyproj import Transformer
 
 from app.config import get_settings
+from app.geo import overpass
 from app.geo.geocoder import Area
+from app.geo.overpass import StageFn
 
 log = logging.getLogger(__name__)
 
 CONSOLIDATE_TOLERANCE_M = 12.0
-OVERPASS_MIRRORS = [
-    "https://overpass-api.de/api",
-    "https://overpass.private.coffee/api",
-    "https://overpass.kumi.systems/api",
-]
-MAX_ATTEMPTS = 4
-REQUEST_TIMEOUT_S = 60  # per Overpass request; fail fast when servers are overloaded
 EXTRA_WAY_TAGS = ["layer", "lanes:forward", "lanes:backward", "turn:lanes"]
 
 
 def _configure_osmnx() -> None:
-    """Set osmnx cache folder and the extra OSM tags we need."""
-    ox.settings.use_cache = True
-    ox.settings.cache_folder = str(get_settings().path("cache", "osmnx", "x").parent)
-    ox.settings.http_user_agent = get_settings().user_agent
-    ox.settings.requests_timeout = REQUEST_TIMEOUT_S
+    """Register the extra OSM way tags we need (read by `graph_from_xml`)."""
     for tag in EXTRA_WAY_TAGS:
         if tag not in ox.settings.useful_tags_way:
             ox.settings.useful_tags_way.append(tag)
@@ -54,45 +46,55 @@ def _signal_points(G: nx.MultiDiGraph) -> list[tuple[float, float]]:
             if "traffic_signals" in str(d.get("highway", ""))]
 
 
-def _fetch_raw(bbox: tuple[float, float, float, float]) -> nx.MultiDiGraph:
-    """Download the unsimplified drive network, retrying across Overpass mirrors.
+def graph_from_osm_xml(xml: bytes, bbox: tuple[float, float, float, float]) -> nx.MultiDiGraph:
+    """Unsimplified drive graph from Overpass XML, as `ox.graph_from_bbox` built it.
 
-    Public Overpass servers are often at capacity; we rotate mirrors and back
-    off exponentially (2, 4, 8 ... s) before giving up.
+    Args:
+        xml: OSM XML of every drivable way touching the box (see overpass.build_query).
+        bbox: (west, south, east, north) in degrees.
+    Returns:
+        Unsimplified, unprojected graph: truncated to the box (keeping edges
+        with one end inside) and reduced to its largest weakly connected part.
+    """
+    _configure_osmnx()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "area.osm"
+        path.write_bytes(xml)
+        G = ox.graph_from_xml(path, simplify=False, retain_all=True)
+    G = ox.truncate.truncate_graph_bbox(G, bbox, truncate_by_edge=True)
+    return ox.truncate.largest_component(G)
+
+
+def _fetch_raw(bbox: tuple[float, float, float, float],
+               on_stage: StageFn | None = None) -> nx.MultiDiGraph:
+    """Download the unsimplified drive network (time-bounded, see geo/overpass.py).
 
     Args:
         bbox: (west, south, east, north) in degrees.
+        on_stage: Optional progress callback.
     Returns:
         Unsimplified, unprojected osmnx graph.
+    Raises:
+        overpass.OverpassUnavailable: if no server answered in time.
     """
-    delay = 2.0
-    for attempt in range(MAX_ATTEMPTS):
-        ox.settings.overpass_url = OVERPASS_MIRRORS[attempt % len(OVERPASS_MIRRORS)]
-        try:
-            return ox.graph_from_bbox(bbox, network_type="drive", simplify=False,
-                                      truncate_by_edge=True)
-        except Exception as exc:  # osmnx raises several HTTP / parse error types
-            if attempt == MAX_ATTEMPTS - 1:
-                raise
-            log.warning("Overpass %s failed (%s); retrying in %.0fs",
-                        ox.settings.overpass_url, type(exc).__name__, delay)
-            time.sleep(delay)
-            delay *= 2
-    raise RuntimeError("unreachable")
+    return graph_from_osm_xml(overpass.fetch_xml(bbox, on_stage), bbox)
 
 
-def _download(area: Area) -> nx.MultiDiGraph:
+def _download(area: Area, on_stage: StageFn | None = None) -> nx.MultiDiGraph:
     """Download, simplify, project and consolidate the drive network.
 
     Args:
         area: Simulation area (bbox in degrees).
+        on_stage: Optional progress callback.
     Returns:
         Projected, consolidated MultiDiGraph with graph attrs
         `signals` (JSON list of projected xy), `driving_side`, `area_id`, `bbox`.
     """
     _configure_osmnx()
     bbox = (area.west, area.south, area.east, area.north)
-    G = _fetch_raw(bbox)
+    G = _fetch_raw(bbox, on_stage)
+    if on_stage:
+        on_stage("building road network")
     signals_ll = _signal_points(G)
     G = ox.simplify_graph(G)
     Gp = ox.project_graph(G)
@@ -107,18 +109,21 @@ def _download(area: Area) -> nx.MultiDiGraph:
     return Gc
 
 
-def load_or_build(area: Area) -> nx.MultiDiGraph:
+def load_or_build(area: Area, on_stage: StageFn | None = None) -> nx.MultiDiGraph:
     """Return the cached graph for `area`, downloading it on first use.
 
     Args:
         area: Simulation area.
+        on_stage: Optional progress callback (download server/try, build step).
     Returns:
         Projected, consolidated road graph (see `_download`).
+    Raises:
+        overpass.OverpassUnavailable: if the download failed within its time budget.
     """
     path = get_settings().path("graphs", f"{area.area_id}.graphml")
     if path.exists():
         return ox.load_graphml(path)
-    G = _download(area)
+    G = _download(area, on_stage)
     ox.save_graphml(G, path)
     return ox.load_graphml(path)
 

@@ -37,6 +37,12 @@ class Settings(BaseSettings):
         default_half_side_m: Area half-side used when geocoding a point.
         nominatim_url: Nominatim search endpoint.
         user_agent: Generic client name sent to OSM services.
+        overpass_urls: Comma separated Overpass API base URLs, tried in order.
+        overpass_connect_s: TCP connect timeout per Overpass server (s); an
+            unreachable server is skipped after this long.
+        overpass_read_s: Max wait for one Overpass answer (s).
+        overpass_budget_s: Total time allowed for one road-network download
+            across all servers and retries (s).
     """
 
     model_config = SettingsConfigDict(
@@ -64,10 +70,25 @@ class Settings(BaseSettings):
     nominatim_url: str = "https://nominatim.openstreetmap.org/search"
     user_agent: str = "vehicle-flow-sim/0.1"
 
+    overpass_urls: str = (
+        "https://overpass-api.de/api,"
+        "https://lz4.overpass-api.de/api,"
+        "https://maps.mail.ru/osm/tools/overpass/api,"
+        "https://overpass.private.coffee/api"
+    )
+    overpass_connect_s: float = 5.0
+    overpass_read_s: float = 120.0
+    overpass_budget_s: float = 240.0
+
     @property
     def cors_origin_list(self) -> list[str]:
         """Return CORS origins as a list."""
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def overpass_url_list(self) -> list[str]:
+        """Return Overpass base URLs as a list."""
+        return [u.strip().rstrip("/") for u in self.overpass_urls.split(",") if u.strip()]
 
     def path(self, *parts: str) -> Path:
         """Return a path under `data_dir`, creating parent folders.

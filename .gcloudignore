@@ -1,0 +1,15 @@
+# Files not uploaded to Cloud Build (same rules as .dockerignore).
+.git
+.env
+.env.*
+!.env.example
+data
+deploy
+**/node_modules
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+frontend/dist
+backend/tests
+*.png

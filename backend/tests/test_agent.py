@@ -7,6 +7,7 @@ import pytest
 from ollama import ResponseError
 
 from app.api.schemas import ChatMessage, RunRequest
+from app.config import get_settings
 from app.llm import agent
 from app.llm.provider import FakeProvider, LLMError, OllamaProvider
 from tests.conftest import MISSING_PLACE, TEST_PLACE
@@ -123,7 +124,7 @@ class _Resp:
 
 
 def test_ollama_provider_returns_content_and_sends_schema(monkeypatch):
-    prov = OllamaProvider("https://ollama.com", "key", "glm-5.3-flash")
+    prov = OllamaProvider("http://ollama.test", "qwen3:8b", think=False)
     seen = {}
 
     def chat(**kw):
@@ -131,16 +132,87 @@ def test_ollama_provider_returns_content_and_sends_schema(monkeypatch):
         return _Resp()
     monkeypatch.setattr(prov.client, "chat", chat)
     assert prov.complete([{"role": "user", "content": "x"}], {"type": "object"}) == _Msg.content
-    assert seen["model"] == "glm-5.3-flash" and seen["format"] == {"type": "object"}
+    assert seen["model"] == "qwen3:8b" and seen["format"] == {"type": "object"}
+    assert seen["think"] is False
 
 
 @pytest.mark.parametrize("exc", [ResponseError("Add usage credits", 402),
                                  httpx.ConnectError("down")])
 def test_ollama_provider_maps_failures_to_llm_error(monkeypatch, exc):
-    prov = OllamaProvider("https://ollama.com", "key", "m")
+    prov = OllamaProvider("http://ollama.test", "m")
 
     def chat(**kw):
         raise exc
     monkeypatch.setattr(prov.client, "chat", chat)
     with pytest.raises(LLMError):
         prov.complete([], {})
+
+
+# ---- Authentication to the Ollama server --------------------------------------
+
+def test_auth_headers_per_mode(monkeypatch):
+    from app.llm import gcp_auth
+    from app.llm.provider import _auth_headers
+
+    calls = []
+
+    class _Tok:
+        text = "tok-1\n"
+
+        def raise_for_status(self):
+            pass
+
+    def fake_get(url, params, headers, timeout):
+        calls.append(params["audience"])
+        assert headers == {"Metadata-Flavor": "Google"}
+        return _Tok()
+
+    monkeypatch.setattr(gcp_auth.httpx, "get", fake_get)
+    monkeypatch.setattr(gcp_auth, "_cache", {})
+    host = "https://ollama-1.run.app"
+    assert _auth_headers("none", host, "") == {}
+    assert _auth_headers("key", host, "k") == {"Authorization": "Bearer k"}
+    assert _auth_headers("gcp", host, "") == {"Authorization": "Bearer tok-1"}
+    assert _auth_headers("gcp", host, "") == {"Authorization": "Bearer tok-1"}
+    assert calls == [host]  # second call served from the cache
+    with pytest.raises(LLMError):
+        _auth_headers("key", host, "")
+    with pytest.raises(LLMError):
+        _auth_headers("magic", host, "")
+
+
+def test_gcp_token_refreshes_before_expiry(monkeypatch):
+    from app.llm import gcp_auth
+
+    tokens = iter(["a", "b"])
+
+    class _Tok:
+        def __init__(self):
+            self.text = next(tokens)
+
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(gcp_auth.httpx, "get", lambda *a, **kw: _Tok())
+    monkeypatch.setattr(gcp_auth, "_cache", {})
+    assert gcp_auth.id_token("aud", now=0) == "a"
+    assert gcp_auth.id_token("aud", now=3000) == "a"
+    assert gcp_auth.id_token("aud", now=3301) == "b"
+
+
+def test_gcp_auth_off_cloud_falls_back_to_rules(grid_area, monkeypatch):
+    from app.llm import gcp_auth
+
+    def down(*a, **kw):
+        raise httpx.ConnectError("no metadata server")
+
+    monkeypatch.setattr(gcp_auth.httpx, "get", down)
+    monkeypatch.setattr(gcp_auth, "_cache", {})
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("OLLAMA_AUTH", "gcp")
+    get_settings.cache_clear()
+    try:
+        reply = agent.respond([ChatMessage(role="user", content="simulate Test Grid")])
+    finally:
+        get_settings.cache_clear()
+    assert reply.agent == "rules" and "Google ID token" in reply.reply

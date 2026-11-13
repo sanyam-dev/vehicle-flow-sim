@@ -16,10 +16,15 @@ class Settings(BaseSettings):
     """Typed runtime configuration.
 
     Attributes:
-        ollama_api_key: Bearer token for Ollama Cloud.
-        llm_provider: "ollama" (Ollama Cloud), "rules" (no LLM) or "fake" (tests).
+        ollama_api_key: Bearer token for Ollama Cloud (OLLAMA_AUTH=key only).
+        llm_provider: "ollama", "rules" (no LLM) or "fake" (tests).
         llm_model: Model name passed to the provider.
-        ollama_host: Base URL of the Ollama API.
+        ollama_host: Base URL of the Ollama API (our Cloud Run Ollama service
+            in production, http://localhost:11434 for a local server).
+        ollama_auth: "gcp" (Google ID token, private Cloud Run service),
+            "key" (Bearer OLLAMA_API_KEY) or "none".
+        llm_timeout_s: HTTP timeout per LLM call; long enough for a cold start.
+        llm_think: Reasoning mode for thinking models (None = model default).
         sim_seed: Fixed random seed used by every simulation RNG.
         max_workers: Max concurrent per-session worker processes.
         worker_idle_timeout_s: Idle seconds before a worker process exits.
@@ -40,8 +45,11 @@ class Settings(BaseSettings):
 
     ollama_api_key: str = ""
     llm_provider: str = "ollama"
-    llm_model: str = "glm-5.3-flash"
-    ollama_host: str = "https://ollama.com"
+    llm_model: str = "qwen3:8b"
+    ollama_host: str = "http://localhost:11434"
+    ollama_auth: str = "none"
+    llm_timeout_s: float = 120.0
+    llm_think: bool | None = False
 
     sim_seed: int = 42
     max_workers: int = 8

@@ -31,6 +31,13 @@ gcloud config set project "$PROJECT_ID"
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
   artifactregistry.googleapis.com secretmanager.googleapis.com
 
+# New projects no longer give the default compute service account (which Cloud
+# Build uses for source deploys) the rights to read sources and push images.
+PNUM="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${PNUM}-compute@developer.gserviceaccount.com" \
+  --role=roles/run.builder --condition=None >/dev/null
+
 # Ollama key from ../../.env -> Secret Manager (created once, new version on reruns).
 KEY="$(grep -E '^OLLAMA_API_KEY=' "$ROOT/.env" | cut -d= -f2- || true)"
 if [ -n "$KEY" ]; then
@@ -38,7 +45,6 @@ if [ -n "$KEY" ]; then
     gcloud secrets create ollama-api-key --replication-policy=automatic
   fi
   printf '%s' "$KEY" | gcloud secrets versions add ollama-api-key --data-file=-
-  PNUM="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
   gcloud secrets add-iam-policy-binding ollama-api-key \
     --member="serviceAccount:${PNUM}-compute@developer.gserviceaccount.com" \
     --role=roles/secretmanager.secretAccessor >/dev/null

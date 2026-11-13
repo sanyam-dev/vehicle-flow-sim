@@ -45,7 +45,7 @@ OLLAMA_REGION="${OLLAMA_REGION:-asia-southeast1}"
 OLLAMA_URL="$(gcloud run services describe "${OLLAMA_SERVICE:-ollama}" \
   --region "$OLLAMA_REGION" --format='value(status.url)' 2>/dev/null || true)"
 if [ -n "$OLLAMA_URL" ]; then
-  LLM_ENV="LLM_PROVIDER=ollama,OLLAMA_HOST=${OLLAMA_URL},OLLAMA_AUTH=gcp,LLM_MODEL=${MODEL:-qwen3:8b},LLM_THINK=false"
+  LLM_ENV="LLM_PROVIDER=ollama,OLLAMA_HOST=${OLLAMA_URL},OLLAMA_AUTH=gcp,LLM_MODEL=${MODEL:-qwen3:8b},LLM_THINK=false,LLM_TIMEOUT_S=180"
 else
   echo "No Ollama service found (run deploy-ollama.sh): chat will use the keyword parser."
   LLM_ENV="LLM_PROVIDER=rules"

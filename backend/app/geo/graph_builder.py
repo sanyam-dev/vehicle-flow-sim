@@ -28,7 +28,8 @@ OVERPASS_MIRRORS = [
     "https://overpass.private.coffee/api",
     "https://overpass.kumi.systems/api",
 ]
-MAX_ATTEMPTS = 6
+MAX_ATTEMPTS = 4
+REQUEST_TIMEOUT_S = 60  # per Overpass request; fail fast when servers are overloaded
 EXTRA_WAY_TAGS = ["layer", "lanes:forward", "lanes:backward", "turn:lanes"]
 
 
@@ -37,6 +38,7 @@ def _configure_osmnx() -> None:
     ox.settings.use_cache = True
     ox.settings.cache_folder = str(get_settings().path("cache", "osmnx", "x").parent)
     ox.settings.http_user_agent = get_settings().user_agent
+    ox.settings.requests_timeout = REQUEST_TIMEOUT_S
     for tag in EXTRA_WAY_TAGS:
         if tag not in ox.settings.useful_tags_way:
             ox.settings.useful_tags_way.append(tag)

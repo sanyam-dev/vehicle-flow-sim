@@ -1,0 +1,11 @@
+# Roads-only Geofabrik extracts -> Cloud Storage. Submitted by ../build-extracts.sh.
+steps:
+- name: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+  entrypoint: bash
+  args: [build.sh]
+  env: [BUCKET=${_BUCKET}, REGIONS=${_REGIONS}]
+substitutions:
+  _BUCKET: ""
+  _REGIONS: ""
+options: {machineType: E2_HIGHCPU_8, diskSizeGb: 100}
+timeout: 5400s

@@ -43,6 +43,11 @@ class Settings(BaseSettings):
         overpass_read_s: Max wait for one Overpass answer (s).
         overpass_budget_s: Total time allowed for one road-network download
             across all servers and retries (s).
+        overpass_budget_with_fallback_s: Shorter Overpass budget used when an
+            offline extract covers the area and can take over (s).
+        osm_extracts_dir: Folder of roads-only Geofabrik extracts
+            (`<id>.osm.pbf` + `<id>.poly` [+ `<id>.date`]); None disables the
+            offline fallback. On Cloud Run it is the mounted extracts bucket.
     """
 
     model_config = SettingsConfigDict(
@@ -79,6 +84,8 @@ class Settings(BaseSettings):
     overpass_connect_s: float = 5.0
     overpass_read_s: float = 120.0
     overpass_budget_s: float = 240.0
+    overpass_budget_with_fallback_s: float = 60.0
+    osm_extracts_dir: Path | None = None
 
     @property
     def cors_origin_list(self) -> list[str]:

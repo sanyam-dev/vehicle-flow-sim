@@ -25,16 +25,21 @@ from app.config import get_settings
 
 log = logging.getLogger(__name__)
 
-# Copied from osmnx 2.1.1 `_overpass._get_network_filter("drive")`, so the
-# graph matches what `ox.graph_from_bbox(network_type="drive")` downloaded.
-DRIVE_FILTER = (
-    '["highway"]["area"!~"yes"]["access"!~"private"]'
-    '["highway"!~"abandoned|bridleway|bus_guideway|construction|corridor|cycleway|'
-    "elevator|escalator|footway|no|path|pedestrian|planned|platform|proposed|raceway|"
-    'razed|rest_area|service|services|steps|track"]'
-    '["motor_vehicle"!~"no"]["motorcar"!~"no"]'
-    '["service"!~"alley|driveway|emergency_access|parking|parking_aisle|private"]'
+# osmnx 2.1.1 `_overpass._get_network_filter("drive")` as (tag, regex) pairs:
+# a way with the `highway` tag is drivable unless one of these tags is present
+# and its value matches the (unanchored) regex. Shared by the Overpass query
+# below and `graph_builder.keep_drive_ways`, which filters offline extracts.
+DRIVE_EXCLUDE: tuple[tuple[str, str], ...] = (
+    ("area", "yes"),
+    ("access", "private"),
+    ("highway", "abandoned|bridleway|bus_guideway|construction|corridor|cycleway|"
+                "elevator|escalator|footway|no|path|pedestrian|planned|platform|proposed|"
+                "raceway|razed|rest_area|service|services|steps|track"),
+    ("motor_vehicle", "no"),
+    ("motorcar", "no"),
+    ("service", "alley|driveway|emergency_access|parking|parking_aisle|private"),
 )
+DRIVE_FILTER = '["highway"]' + "".join(f'["{k}"!~"{v}"]' for k, v in DRIVE_EXCLUDE)
 PASSES = 2  # rounds over the server list
 PASS_BACKOFF_S = 5.0  # pause between rounds
 MIN_TRY_S = 15.0  # do not start a request with less budget left than this
@@ -118,22 +123,24 @@ def _unavailable(failures: list[str]) -> OverpassUnavailable:
 
 
 def fetch_xml(bbox: tuple[float, float, float, float], on_stage: StageFn | None = None,
-              *, clock: Callable[[], float] = time.monotonic,
+              *, budget_s: float | None = None, clock: Callable[[], float] = time.monotonic,
               sleep: Callable[[float], None] = time.sleep) -> bytes:
     """Download the drive network of `bbox` as OSM XML within the time budget.
 
     Args:
         bbox: (west, south, east, north) in degrees.
         on_stage: Optional progress callback, given a one-line status text.
+        budget_s: Total time allowed (s); defaults to `overpass_budget_s`.
+            Shorter when an offline extract can take over (see graph_builder).
         clock, sleep: Injected for tests.
     Returns:
         OSM XML bytes.
     Raises:
-        OverpassUnavailable: if no server answered within `overpass_budget_s`.
+        OverpassUnavailable: if no server answered within the budget.
     """
     s = get_settings()
     mirrors = s.overpass_url_list
-    deadline = clock() + s.overpass_budget_s
+    deadline = clock() + (s.overpass_budget_s if budget_s is None else budget_s)
     failures: list[str] = []
     dead: set[str] = set()  # unreachable once -> skipped in later rounds
     tries, total = 0, PASSES * len(mirrors)

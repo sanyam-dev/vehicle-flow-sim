@@ -88,7 +88,11 @@
 </script>
 
 <div class="map-wrap">
-  <div class="map" bind:this={container}></div>
+  <!-- Leaflet owns the inner div. If the stylesheet is not applied yet when the
+       map is created (Safari), Leaflet writes an inline position: relative on its
+       container; sizing with width/height 100% inside the positioned outer box
+       keeps the map full size either way. -->
+  <div class="map"><div class="map-inner" bind:this={container}></div></div>
 
   {#if app.network}
     <div class="card net-card">
@@ -125,6 +129,7 @@
   .map-wrap { position: relative; flex: 1; min-height: 0; border: 1px solid var(--line);
               border-radius: var(--radius); overflow: hidden; background: var(--map-bg); }
   .map { position: absolute; inset: 0; z-index: 0; } /* own stacking context: Leaflet panes stay under the overlays */
+  .map-inner { width: 100%; height: 100%; }
   .card { position: absolute; background: rgba(17, 23, 32, 0.92); border: 1px solid var(--line);
           border-radius: 8px; padding: 10px 12px; }
   .net-card { top: 14px; left: 14px; max-width: 60%; }

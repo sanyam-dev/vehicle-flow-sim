@@ -138,13 +138,28 @@ def _prompt_messages(history: list[ChatMessage], current: RunRequest,
     return [{"role": "system", "content": system}] + [m.model_dump() for m in history]
 
 
+def llm_schema() -> dict:
+    """JSON schema sent to the model for structured output.
+
+    Every field is required (null is still allowed where the model may keep a
+    value): with optional fields small models emit only `reply` and leave the
+    parameters out. `reply` comes last so the model fills the parameters first
+    and then summarises them.
+    """
+    schema = AgentTurn.model_json_schema()
+    props = schema["properties"]
+    schema["properties"] = {k: props[k] for k in [*[k for k in props if k != "reply"], "reply"]}
+    schema["required"] = list(schema["properties"])
+    return schema
+
+
 def ask_llm(provider: LLMProvider, messages: list[dict]) -> AgentTurn:
     """Get a valid AgentTurn, retrying once with the validation error.
 
     Raises:
         LLMError: if the provider fails or every answer is invalid.
     """
-    schema = AgentTurn.model_json_schema()
+    schema = llm_schema()
     msgs = list(messages)
     for _ in range(MAX_ATTEMPTS):
         raw = provider.complete(msgs, schema)

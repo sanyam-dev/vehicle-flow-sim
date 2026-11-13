@@ -216,3 +216,10 @@ def test_gcp_auth_off_cloud_falls_back_to_rules(grid_area, monkeypatch):
     finally:
         get_settings.cache_clear()
     assert reply.agent == "rules" and "Google ID token" in reply.reply
+
+
+def test_llm_schema_requires_every_field_reply_last():
+    schema = agent.llm_schema()
+    assert schema["required"] == list(schema["properties"])
+    assert list(schema["properties"])[-1] == "reply"
+    assert set(schema["properties"]) == set(agent.AgentTurn.model_fields)

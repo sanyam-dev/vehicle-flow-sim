@@ -1,0 +1,40 @@
+[project]
+name = "vfsim-backend"
+version = "0.1.0"
+description = "Vehicle Flow Simulator backend: OSM graph, agent-based traffic engine, FastAPI"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.162.5",
+    "httpx>=0.28.1",
+    "msgpack>=1.2.4",
+    "networkx>=3.7",
+    "numpy>=2.5.4",
+    "ollama>=0.6.3",
+    "osmnx>=2.1.1",
+    "pydantic>=2.14.3",
+    "pydantic-settings>=2.16.2",
+    "pyproj>=3.8.0",
+    "rapidfuzz>=3.14.6",
+    "shapely>=2.2.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.5",
+]

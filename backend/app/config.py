@@ -24,7 +24,9 @@ class Settings(BaseSettings):
         max_workers: Max concurrent per-session worker processes.
         worker_idle_timeout_s: Idle seconds before a worker process exits.
         data_dir: Root folder for caches, run frames and sqlite files.
-        cors_origins: Comma separated list of allowed browser origins.
+        cors_origins: Comma separated list of allowed browser origins (dev
+            servers only; in production the frontend is served same-origin).
+        static_dir: Built frontend (index.html + assets) served at "/" if present.
         max_half_side_m: Area cap, half the side of the square bbox (m).
         default_half_side_m: Area half-side used when geocoding a point.
         nominatim_url: Nominatim search endpoint.
@@ -45,6 +47,7 @@ class Settings(BaseSettings):
     worker_idle_timeout_s: int = 600
     data_dir: Path = _REPO_ROOT / "data"
     cors_origins: str = "http://localhost:5173"
+    static_dir: Path = _REPO_ROOT / "frontend" / "dist"
 
     max_half_side_m: float = 1750.0
     default_half_side_m: float = 700.0

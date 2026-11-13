@@ -141,3 +141,24 @@ def test_full_capacity_returns_503(client, monkeypatch):
     r = client.post("/api/runs", json=QUICK, headers=SESSION_B)
     assert r.status_code == 503
     assert r.headers["Retry-After"] == str(worker.RETRY_AFTER_S)
+
+
+# ---- built frontend served by the API --------------------------------------------
+
+def test_built_frontend_is_served_same_origin(grid_area, tmp_path, monkeypatch):
+    """With a built frontend present, / serves it and /api still answers."""
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<title>Traffic Sim Studio</title>")
+    (dist / "assets" / "app-abc123.js").write_text("console.log(1)")
+    monkeypatch.setattr(get_settings(), "static_dir", dist)
+    with TestClient(create_app()) as c:
+        assert "Traffic Sim Studio" in c.get("/").text
+        asset = c.get("/assets/app-abc123.js")
+        assert asset.status_code == 200 and "immutable" in asset.headers["cache-control"]
+        assert c.get("/api/health").json() == {"ok": True}
+        assert c.get("/missing.js").status_code == 404

@@ -14,8 +14,11 @@ worker process needs no channel back to the API.
 """
 
 import json
+import multiprocessing
+import os
 import re
 import secrets
+import time
 from pathlib import Path
 
 from app.config import get_settings
@@ -60,8 +63,48 @@ def read_json(path: Path):
 
 
 def set_status(run_id: str, state: str, stage: str = "", error: str = "") -> None:
-    """Persist the run's lifecycle state."""
-    write_json(run_dir(run_id) / "status.json", {"state": state, "stage": stage, "error": error})
+    """Persist the run's lifecycle state.
+
+    Also records the writing process id (`pid`), so the API can tell a run
+    whose worker died from one still running, and the time (`updated`).
+    """
+    write_json(run_dir(run_id) / "status.json",
+               {"state": state, "stage": stage, "error": error,
+                "pid": os.getpid(), "updated": time.time()})
+
+
+def _alive(pid: int) -> bool:
+    """True if a process with this id exists (signal 0 only checks).
+
+    Workers are children of the API process: a dead one stays a zombie (and
+    still answers signal 0) until reaped, so reap finished children first.
+    """
+    multiprocessing.active_children()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # exists, owned by another user
+        return True
+    return True
+
+
+def reconcile_dead(run_id: str, status: dict) -> dict:
+    """Turn a "running" run whose worker process has died into an error.
+
+    Args:
+        run_id: Run id.
+        status: The run's status.json content.
+    Returns:
+        The status to report (rewritten on disk when the worker is gone).
+    """
+    pid = status.get("pid")
+    if status.get("state") != "running" or not isinstance(pid, int) or _alive(pid):
+        return status
+    msg = "The simulation worker stopped unexpectedly; please start the run again."
+    write_json(run_dir(run_id) / "status.json",
+               {**status, "state": "error", "error": msg, "updated": time.time()})
+    return read_json(run_dir(run_id) / "status.json")
 
 
 def progress(run_id: str, request: dict) -> float:

@@ -107,6 +107,7 @@ def get_run(run_id: str) -> dict:
     d = _dir(run_id)
     request = store.read_json(d / "request.json")
     status = store.read_json(d / "status.json") or {"state": "queued"}
+    status = store.reconcile_dead(run_id, status)
     return {"id": run_id, **status, "request": request,
             "progress": 1.0 if status["state"] == "done" else store.progress(run_id, request),
             "has_network": (d / "network.json").exists(),

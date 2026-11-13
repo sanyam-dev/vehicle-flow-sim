@@ -120,6 +120,26 @@ def test_unknown_place_reports_error(client):
 
 # ---- per-session worker processes ------------------------------------------------
 
+def test_run_whose_worker_died_turns_into_error(client):
+    """A "running" status written by a process that no longer exists."""
+    import multiprocessing as mp
+
+    from app.runs import store
+
+    proc = mp.get_context("spawn").Process(target=time.sleep, args=(0,))
+    proc.start()
+    proc.join()
+    run_id = store.new_run_id()
+    d = store.run_dir(run_id)
+    d.mkdir(parents=True)
+    store.write_json(d / "request.json", {**QUICK, "dt": 0.5, "seed": 42})
+    store.write_json(d / "status.json", {"state": "running", "stage": "simulating",
+                                         "error": "", "pid": proc.pid})
+    doc = client.get(f"/api/runs/{run_id}").json()
+    assert doc["state"] == "error" and "stopped unexpectedly" in doc["error"], dump(doc)
+    assert store.read_json(d / "status.json")["state"] == "error"
+
+
 def test_each_session_gets_its_own_worker(client):
     """Two sessions -> two live worker processes; one session reuses its worker."""
     ids = [start(client, QUICK, SESSION_A), start(client, QUICK, SESSION_B)]

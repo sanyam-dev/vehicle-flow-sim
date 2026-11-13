@@ -19,6 +19,9 @@
 #   --memory 4Gi --cpu 2  one OSM graph + a few concurrent per-session workers.
 #   --timeout 3600       long polling-free requests are short, but allow area
 #                        downloads (Overpass) on POST paths to finish.
+#   --add-volume osm     the roads-only Geofabrik extracts bucket from
+#                        build-extracts.sh, mounted read-only at /osm: the
+#                        fallback when Overpass is down (needs gen2).
 # The local disk is ephemeral: the graph / geocode caches and run results are
 # lost when the instance restarts (acceptable for v1).
 set -euo pipefail
@@ -51,6 +54,19 @@ else
   LLM_ENV="LLM_PROVIDER=rules"
 fi
 
+# Offline road extracts (Overpass fallback), if build-extracts.sh has been run.
+EXTRACTS_BUCKET="${EXTRACTS_BUCKET:-${PROJECT_ID}-osm-extracts}"
+if gcloud storage buckets describe "gs://$EXTRACTS_BUCKET" >/dev/null 2>&1; then
+  VOLUME_FLAGS=(--execution-environment gen2
+    --add-volume "name=osm,type=cloud-storage,bucket=${EXTRACTS_BUCKET},readonly=true"
+    --add-volume-mount "volume=osm,mount-path=/osm")
+  EXTRACTS_ENV=",OSM_EXTRACTS_DIR=/osm"
+else
+  echo "No gs://$EXTRACTS_BUCKET (run build-extracts.sh): no offline fallback for Overpass."
+  VOLUME_FLAGS=(--clear-volumes --clear-volume-mounts)
+  EXTRACTS_ENV=""
+fi
+
 # Build the root Dockerfile (frontend + backend) with Cloud Build and deploy.
 gcloud run deploy "$SERVICE" \
   --source "$ROOT" \
@@ -62,7 +78,8 @@ gcloud run deploy "$SERVICE" \
   --cpu 2 --memory 4Gi \
   --timeout 3600 \
   --clear-secrets \
-  --set-env-vars "DATA_DIR=/tmp/data,MAX_WORKERS=3,${LLM_ENV}"
+  "${VOLUME_FLAGS[@]}" \
+  --set-env-vars "DATA_DIR=/tmp/data,MAX_WORKERS=3,${LLM_ENV}${EXTRACTS_ENV}"
 
 URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
 curl -fsS "$URL/api/health" && echo

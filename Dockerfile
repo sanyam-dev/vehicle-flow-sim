@@ -11,6 +11,9 @@ RUN npm run build
 
 # ---- 2. backend + built frontend ------------------------------------------------
 FROM python:3.12-slim
+# osmium cuts areas out of the offline road extracts (Overpass fallback).
+RUN apt-get update && apt-get install -y --no-install-recommends osmium-tool \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /usr/local/bin/uv
 WORKDIR /app
 COPY backend/pyproject.toml backend/uv.lock ./

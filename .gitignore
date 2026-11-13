@@ -10,6 +10,5 @@ __pycache__/
 # node
 node_modules/
 dist/
-.vercel/
 # runtime data (graphs, geocode cache, run frames, sqlite)
 data/

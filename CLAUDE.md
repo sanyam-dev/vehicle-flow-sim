@@ -48,7 +48,7 @@ Check `./architecture.md` for reference
 
 ## Dependencies: 
 
-- Host : Vercel
+- Host : Google Cloud Run (one service: FastAPI serves the API and the built frontend)
 - Maps : Leaflet
 - Metrics : uPlots
 - UI : Svelte + Vite

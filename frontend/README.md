@@ -28,12 +28,8 @@ Refresh the demo from a finished run on a running backend:
 node scripts/snapshot-demo.mjs <run-id> http://localhost:8000
 ```
 
-## Deploy (Vercel)
+## Deploy (Google Cloud Run)
 
-```bash
-cd frontend
-vercel deploy                 # preview
-vercel deploy --prod          # production
-```
-
-To connect a live backend, set `VITE_API_BASE_URL` (Production env) to the public FastAPI URL and redeploy. The backend already allows `https://*.vercel.app` in CORS.
+The frontend is not deployed on its own. The root `Dockerfile` builds it and
+FastAPI serves it next to the API from one Cloud Run service (same origin, so
+`VITE_API_BASE_URL` stays empty). See `deploy/gcp/deploy.sh`.

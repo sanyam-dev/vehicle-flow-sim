@@ -79,8 +79,14 @@ function stallWatch() {
   };
 }
 
-/** Poll a run until it finishes, loading the network as soon as it exists. */
-export async function poll(id) {
+/**
+ * Poll a run until it finishes, loading the network as soon as it exists.
+ * @param {string} id run id
+ * @param {{forgetIfMissing?: boolean}} [opts] when true, a 404 (run gone,
+ *   e.g. after a server restart wiped the run store) quietly resets the page
+ *   instead of showing an error; used when restoring a run from the URL.
+ */
+export async function poll(id, { forgetIfMissing = false } = {}) {
   const token = ++pollToken;
   const stalled = stallWatch();
   while (token === pollToken) {
@@ -88,6 +94,11 @@ export async function poll(id) {
     try {
       run = await api.run(id);
     } catch (err) {
+      if (forgetIfMissing && err.status === 404) {
+        setHash(null);
+        Object.assign(app, { runId: null, status: 'idle', stage: '', error: '' });
+        return;
+      }
       Object.assign(app, { status: 'error', error: err.message });
       return;
     }
@@ -129,7 +140,7 @@ export async function openRun(id) {
   Object.assign(app, { runId: id, network: null, result: null, status: 'queued', error: '',
                        startedAt: Date.now() });
   setHash(id);
-  await poll(id);
+  await poll(id, { forgetIfMissing: true });
 }
 
 /** Open the demo run shipped with the static build. */

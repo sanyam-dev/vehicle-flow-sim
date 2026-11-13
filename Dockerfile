@@ -16,9 +16,11 @@ WORKDIR /app
 COPY backend/pyproject.toml backend/uv.lock ./
 RUN UV_HTTP_TIMEOUT=300 uv sync --frozen --no-dev
 COPY backend/app ./app
+COPY backend/seed ./seed
 COPY --from=frontend /src/dist ./static
 ENV PATH="/app/.venv/bin:$PATH" \
     STATIC_DIR=/app/static \
+    SEED_DIR=/app/seed \
     DATA_DIR=/data \
     PORT=8000
 EXPOSE 8000

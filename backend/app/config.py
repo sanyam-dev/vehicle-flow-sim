@@ -27,6 +27,7 @@ class Settings(BaseSettings):
         cors_origins: Comma separated list of allowed browser origins (dev
             servers only; in production the frontend is served same-origin).
         static_dir: Built frontend (index.html + assets) served at "/" if present.
+        seed_dir: Areas shipped with the app (graphs + geocoder rows), see geo/seed.py.
         max_half_side_m: Area cap, half the side of the square bbox (m).
         default_half_side_m: Area half-side used when geocoding a point.
         nominatim_url: Nominatim search endpoint.
@@ -48,6 +49,7 @@ class Settings(BaseSettings):
     data_dir: Path = _REPO_ROOT / "data"
     cors_origins: str = "http://localhost:5173"
     static_dir: Path = _REPO_ROOT / "frontend" / "dist"
+    seed_dir: Path = _REPO_ROOT / "backend" / "seed"
 
     max_half_side_m: float = 1750.0
     default_half_side_m: float = 700.0

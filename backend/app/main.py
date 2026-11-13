@@ -16,12 +16,14 @@ from starlette.types import Scope
 
 from app.api.routes import router
 from app.config import get_settings
+from app.geo.seed import install_seed
 from app.runs import worker
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Shut the worker pool down with the API."""
+    """Install shipped areas on start-up; shut the workers down with the API."""
+    install_seed()
     yield
     worker.shutdown()
 

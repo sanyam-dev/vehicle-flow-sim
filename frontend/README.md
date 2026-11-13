@@ -33,3 +33,9 @@ node scripts/snapshot-demo.mjs <run-id> http://localhost:8000
 The frontend is not deployed on its own. The root `Dockerfile` builds it and
 FastAPI serves it next to the API from one Cloud Run service (same origin, so
 `VITE_API_BASE_URL` stays empty). See `deploy/gcp/deploy.sh`.
+
+The chat agent's LLM is a second, private Cloud Run service: Ollama with
+`qwen3:8b` on one L4 GPU in `asia-southeast1`, scaled to zero when idle
+(`deploy/gcp/deploy-ollama.sh`, run before `deploy.sh`). Only the app's
+service account may call it. The first chat after an idle spell waits for a
+cold start; if the LLM is unreachable the chat falls back to the keyword parser.

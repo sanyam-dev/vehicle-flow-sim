@@ -53,7 +53,7 @@ Check `./architecture.md` for reference
 - Metrics : uPlots
 - UI : Svelte + Vite
 - Simulations: Python + FastAPI
-- LLM : Ollama Cloud
+- LLM : Ollama (self-hosted on Cloud Run with a GPU)
 
 
 ## Dos and Don'ts

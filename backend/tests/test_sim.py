@@ -1,0 +1,121 @@
+"""Engine tests on synthetic networks (no API, no OSM, no network access)."""
+
+import pytest
+
+from app.scenario.modifier import close_edges, close_lanes, edges_named, scenario_copy
+from app.sim.demand import LEVEL_VPH, entry_rates, main_road_vph
+from app.sim.engine import SimConfig
+from app.sim.network import SIGNAL, compile_network
+from app.sim.runner import prepare_baseline, run_pair
+from tests.synthetic import corridor, grid
+
+CFG = SimConfig(duration_s=420.0, warmup_s=60.0)
+
+
+@pytest.fixture(scope="module")
+def G():
+    """The 3x3 synthetic grid (built once per module)."""
+    return grid()
+
+
+@pytest.fixture(scope="module")
+def baseline(G):
+    """Baseline-only result on the grid at moderate traffic, 09:00."""
+    return run_pair(G, None, "moderate", 9.0, CFG)
+
+
+def _edges_between(Gs, a: int, b: int) -> list:
+    """Both directed edges of the road a<->b."""
+    return [(u, v, k) for u, v, k in Gs.edges(keys=True) if {u, v} == {a, b}]
+
+
+def test_level_definitions_per_main_road():
+    """Main-road rates sit inside the user's ranges, at night and at peak."""
+    for hour in (3.0, 9.0):
+        assert 500 <= main_road_vph("less", hour) <= 700
+        assert 1000 <= main_road_vph("moderate", hour) <= 1400
+        assert main_road_vph("high", hour) >= 2000
+    assert main_road_vph("normal", 9.0) == main_road_vph("moderate", 9.0)  # alias
+    assert LEVEL_VPH["less"][1] < LEVEL_VPH["moderate"][0] < LEVEL_VPH["high"][0]
+
+
+def test_entry_rates_scale_with_level(G):
+    """Every entry spawns more at higher levels; side streets less than main roads."""
+    net = compile_network(G)
+    less, mod, high = (entry_rates(net, lvl, 9.0) for lvl in ("less", "moderate", "high"))
+    assert (less < mod).all() and (mod < high).all()
+    main = [i for i, n in enumerate(net.entries) if "primary" in
+            [net.edge_highway[e] for e in range(net.n_edges) if net.link_from[e] == n]]
+    assert 0 < len(main) < len(net.entries)
+    assert mod[main].min() > mod[[i for i in range(len(mod)) if i not in main]].max()
+
+
+def test_grid_compiles_with_signal_and_entries(G):
+    """Centre junction is signalised; all 12 stub ends are entries and exits."""
+    net = compile_network(G)
+    assert (net.node_kind == SIGNAL).sum() == 1
+    assert len(net.entries) == 12 and len(net.exits) == 12
+    _, _, flow = prepare_baseline(G, "moderate", 9.0, CFG)
+    assert flow.shape == (net.n_edges,) and flow.sum() > 0
+
+
+def test_free_corridor_flows_at_speed():
+    """A lone 1.5 km primary road carries traffic near its speed limit."""
+    res = run_pair(corridor(), None, "less", 3.0, CFG)
+    kpi = res["baseline"]["kpi"]
+    assert kpi["trips_completed"] > 0
+    assert kpi["mean_speed_kmh"] > 35
+    assert kpi["gridlock_removed"] == 0 and kpi["unserved_trips"] == 0
+
+
+def test_baseline_summary_shape(baseline):
+    """Summary carries every metric the UI shows."""
+    s = baseline["baseline"]
+    assert set(s) >= {"kpi", "series", "travel_time_hist", "junctions",
+                      "queue_by_junction", "speed_heatmap"}
+    assert s["kpi"]["trips_completed"] > 0
+    assert s["kpi"]["unserved_trips"] == 0
+    assert any(j["signalised"] for j in s["junctions"])
+    assert baseline["scenario"] is None and baseline["comparison"] is None
+
+
+def test_same_seed_same_result(G, baseline):
+    """Fixed seed: a rerun reproduces the KPIs exactly."""
+    again = run_pair(G, None, "moderate", 9.0, CFG)
+    assert again["baseline"]["kpi"] == baseline["baseline"]["kpi"]
+
+
+def test_side_road_closure_reroutes_without_losing_trips(G):
+    """Closing an inner side road recomputes only affected routes; all trips still served."""
+    Gs = scenario_copy(G)
+    close_edges(Gs, _edges_between(Gs, 0, 1))  # side road between junctions 0 and 1
+    res = run_pair(G, Gs, "moderate", 9.0, CFG)
+    assert 0 < res["info"]["routes_recomputed"] < 12 * 11
+    assert res["scenario"]["kpi"]["unserved_trips"] == 0
+    assert set(res["comparison"]["kpi"]) == set(res["baseline"]["kpi"])
+
+
+def test_closing_an_entry_road_marks_trips_unserved(G):
+    """Regression: a closure that cuts OD pairs off must not crash routing."""
+    Gs = scenario_copy(G)
+    close_edges(Gs, edges_named(Gs, "Main Street"))  # includes both Main Street stubs
+    res = run_pair(G, Gs, "moderate", 9.0, CFG)
+    assert res["scenario"]["kpi"]["unserved_trips"] > 0
+    assert res["baseline"]["kpi"]["unserved_trips"] == 0
+
+
+def test_lane_closure_runs_and_keeps_road_open(G):
+    """Closing the kerb lane of Centre Avenue keeps every trip served."""
+    Gs = scenario_copy(G)
+    close_lanes(Gs, edges_named(Gs, "Centre Avenue"), [0])
+    res = run_pair(G, Gs, "moderate", 9.0, CFG)
+    assert res["scenario"]["kpi"]["unserved_trips"] == 0
+    assert res["scenario"]["kpi"]["trips_completed"] > 0
+
+
+def test_frames_are_recorded(G, tmp_path):
+    """Frames are written as chunks plus meta.json for each variant."""
+    run_pair(G, None, "less", 9.0, SimConfig(duration_s=150.0, warmup_s=30.0), tmp_path)
+    out = tmp_path / "baseline"
+    assert (out / "meta.json").exists()
+    assert len(list(out.glob("chunk_*.npz"))) == 3  # 150 frames / 60 per chunk

@@ -18,6 +18,7 @@ export const app = $state({
   runId: null,
   status: 'idle', // 'idle' | 'queued' | 'running' | 'done' | 'error'
   stage: '',
+  startedAt: null, // Date.now() when the current run was submitted/opened
   progress: 0,
   error: '',
   request: null, // RunRequest of the loaded run

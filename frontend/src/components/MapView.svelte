@@ -27,6 +27,20 @@
   const signalCount = $derived(
     app.network?.features.filter((f) => f.properties.kind === 'signal').length ?? 0);
 
+  // Elapsed time of the current run, ticking once a second while it is busy.
+  let now = $state(Date.now());
+  const busy = $derived(app.status === 'queued' || app.status === 'running');
+  $effect(() => {
+    if (!busy) return;
+    const t = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(t);
+  });
+  const elapsed = $derived.by(() => {
+    if (!app.startedAt) return '';
+    const s = Math.max(0, Math.floor((now - app.startedAt) / 1000));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  });
+
   /** Create the map, layers and click handlers. */
   function initMap() {
     // zoomAnimation off: roads (canvas) and vehicles (own canvas) then always move together.
@@ -102,9 +116,10 @@
     </div>
   {:else}
     <div class="empty">
-      {#if app.status === 'queued' || app.status === 'running'}
+      {#if busy}
         <div class="spinner"></div>
         <div>{app.stage || 'Queued'}…</div>
+        {#if elapsed}<div class="elapsed">{elapsed}</div>{/if}
       {:else}
         <div>Describe a place in the chat, or press <b>Apply &amp; restart</b>.</div>
       {/if}
@@ -148,4 +163,5 @@
   .spinner { width: 28px; height: 28px; border-radius: 50%; border: 3px solid var(--line);
              border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .elapsed { font-variant-numeric: tabular-nums; font-size: 12px; }
 </style>

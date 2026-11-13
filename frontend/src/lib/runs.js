@@ -6,6 +6,9 @@ import { player } from './player.svelte.js';
 import { app, resetLive } from './store.svelte.js';
 
 const POLL_MS = 1000;
+// Backstop: a running run whose stage/progress has not changed for this long
+// is reported as stuck (the backend's own time limits should end it first).
+const STALL_MS = 10 * 60 * 1000;
 let pollToken = 0;
 
 /** Remember the run in the URL hash so a reload reopens it. */
@@ -43,7 +46,8 @@ export async function startRun(request) {
   resetLive();
   Object.assign(app.live, { count: 0, meanKmh: 0, stoppedShare: 0, minute: null });
   Object.assign(app, { status: 'queued', stage: 'submitting', progress: 0, error: '',
-                       result: null, network: null, request, selected: null });
+                       result: null, network: null, request, selected: null,
+                       startedAt: Date.now() });
   try {
     const { id } = await api.createRun(request);
     app.runId = id;
@@ -57,9 +61,28 @@ export async function startRun(request) {
   }
 }
 
+/**
+ * Watch for a running run that stops changing.
+ * @returns {(run: object) => boolean} call once per poll; true when stalled
+ */
+function stallWatch() {
+  let key = '';
+  let since = Date.now();
+  return (run) => {
+    const k = `${run.state}|${run.stage}|${run.progress}`;
+    if (k !== key || run.state !== 'running') {
+      key = k;
+      since = Date.now();
+      return false;
+    }
+    return Date.now() - since > STALL_MS;
+  };
+}
+
 /** Poll a run until it finishes, loading the network as soon as it exists. */
 export async function poll(id) {
   const token = ++pollToken;
+  const stalled = stallWatch();
   while (token === pollToken) {
     let run;
     try {
@@ -74,6 +97,11 @@ export async function poll(id) {
     if (run.has_network && !app.network) app.network = await api.network(id);
     if (run.state === 'done') return finish(id, run.result);
     if (run.state === 'error') return;
+    if (stalled(run)) {
+      Object.assign(app, { status: 'error',
+                           error: 'No progress for 10 minutes; the run looks stuck. Please start it again.' });
+      return;
+    }
     await new Promise((r) => setTimeout(r, POLL_MS));
   }
 }
@@ -98,7 +126,8 @@ export async function attachVariant(variant, keepTime = true) {
 export async function openRun(id) {
   pollToken++;
   player.detach();
-  Object.assign(app, { runId: id, network: null, result: null, status: 'queued', error: '' });
+  Object.assign(app, { runId: id, network: null, result: null, status: 'queued', error: '',
+                       startedAt: Date.now() });
   setHash(id);
   await poll(id);
 }

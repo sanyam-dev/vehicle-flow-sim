@@ -7,6 +7,7 @@
 #   3. A GCP project with billing enabled.
 #
 # Usage:
+#   PROJECT_ID=my-project ./deploy/gcp/deploy-ollama.sh   # chat LLM, once
 #   PROJECT_ID=my-project ./deploy/gcp/deploy.sh
 #   (optional) REGION=asia-south1 SERVICE=vfsim
 #
@@ -29,7 +30,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 gcloud config set project "$PROJECT_ID"
 gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com secretmanager.googleapis.com
+  artifactregistry.googleapis.com
 
 # New projects no longer give the default compute service account (which Cloud
 # Build uses for source deploys) the rights to read sources and push images.
@@ -38,20 +39,16 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${PNUM}-compute@developer.gserviceaccount.com" \
   --role=roles/run.builder --condition=None >/dev/null
 
-# Ollama key from ../../.env -> Secret Manager (created once, new version on reruns).
-KEY="$(grep -E '^OLLAMA_API_KEY=' "$ROOT/.env" | cut -d= -f2- || true)"
-if [ -n "$KEY" ]; then
-  if ! gcloud secrets describe ollama-api-key >/dev/null 2>&1; then
-    gcloud secrets create ollama-api-key --replication-policy=automatic
-  fi
-  printf '%s' "$KEY" | gcloud secrets versions add ollama-api-key --data-file=-
-  gcloud secrets add-iam-policy-binding ollama-api-key \
-    --member="serviceAccount:${PNUM}-compute@developer.gserviceaccount.com" \
-    --role=roles/secretmanager.secretAccessor >/dev/null
-  SECRET_FLAG=(--set-secrets "OLLAMA_API_KEY=ollama-api-key:latest")
+# Chat LLM: the private Ollama GPU service from deploy-ollama.sh, called with
+# the app's Google ID token. Without it the chat uses the keyword parser.
+OLLAMA_REGION="${OLLAMA_REGION:-asia-southeast1}"
+OLLAMA_URL="$(gcloud run services describe "${OLLAMA_SERVICE:-ollama}" \
+  --region "$OLLAMA_REGION" --format='value(status.url)' 2>/dev/null || true)"
+if [ -n "$OLLAMA_URL" ]; then
+  LLM_ENV="LLM_PROVIDER=ollama,OLLAMA_HOST=${OLLAMA_URL},OLLAMA_AUTH=gcp,LLM_MODEL=${MODEL:-qwen3:8b},LLM_THINK=false"
 else
-  echo "No OLLAMA_API_KEY in .env: chat will use the rule-based fallback."
-  SECRET_FLAG=()
+  echo "No Ollama service found (run deploy-ollama.sh): chat will use the keyword parser."
+  LLM_ENV="LLM_PROVIDER=rules"
 fi
 
 # Build the root Dockerfile (frontend + backend) with Cloud Build and deploy.
@@ -64,8 +61,8 @@ gcloud run deploy "$SERVICE" \
   --min-instances 1 --max-instances 1 \
   --cpu 2 --memory 4Gi \
   --timeout 3600 \
-  --set-env-vars "DATA_DIR=/tmp/data,MAX_WORKERS=3" \
-  "${SECRET_FLAG[@]}"
+  --clear-secrets \
+  --set-env-vars "DATA_DIR=/tmp/data,MAX_WORKERS=3,${LLM_ENV}"
 
 URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
 curl -fsS "$URL/api/health" && echo

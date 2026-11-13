@@ -162,3 +162,16 @@ def test_built_frontend_is_served_same_origin(grid_area, tmp_path, monkeypatch):
         assert asset.status_code == 200 and "immutable" in asset.headers["cache-control"]
         assert c.get("/api/health").json() == {"ok": True}
         assert c.get("/missing.js").status_code == 404
+
+
+def test_llm_warm_runs_once_per_interval(client, monkeypatch):
+    from app.llm import agent
+
+    sent = []
+    monkeypatch.setattr(agent, "_last_warm", float("-inf"))
+    monkeypatch.setattr(agent, "warm", lambda: sent.append(1))
+    first = client.post("/api/llm/warm")
+    second = client.post("/api/llm/warm")
+    assert first.status_code == 202 and first.json() == {"warming": True}
+    assert second.json() == {"warming": False}
+    assert sent == [1]  # the background task ran once

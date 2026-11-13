@@ -1,6 +1,7 @@
 """HTTP endpoints.
 
     POST /api/chat                          conversation -> reply + RunRequest
+    POST /api/llm/warm                      wake the LLM before the first chat
     POST /api/runs                          RunRequest -> {"id"}
     GET  /api/runs/{id}                     status, progress, request, result
     GET  /api/runs/{id}/network             GeoJSON road network
@@ -16,10 +17,11 @@ import re
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from app.api.schemas import ChatReply, ChatRequest, RunRequest
+from app.llm import agent
 from app.llm.agent import respond
 from app.runs import store, worker
 from app.runs.export import chunk_json
@@ -60,8 +62,20 @@ def health() -> dict:
 
 @router.post("/chat", response_model=ChatReply)
 def chat(body: ChatRequest) -> ChatReply:
-    """Task-understanding agent turn (Ollama Cloud LLM, rule-based fallback)."""
+    """Task-understanding agent turn (Ollama LLM, rule-based fallback)."""
     return respond(body.messages, body.params)
+
+
+@router.post("/llm/warm", status_code=202)
+def warm_llm(background: BackgroundTasks) -> dict:
+    """Start the LLM in the background (called when the page opens).
+
+    Returns at once; `warming` is false when a warm-up was sent recently.
+    """
+    due = agent.claim_warm()
+    if due:
+        background.add_task(agent.warm)
+    return {"warming": due}
 
 
 @router.post("/runs", status_code=202)

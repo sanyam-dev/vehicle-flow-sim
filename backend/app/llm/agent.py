@@ -15,6 +15,8 @@ or keeps answering invalid JSON, the rule-based agent answers instead.
 
 import json
 import re
+import threading
+import time
 from functools import lru_cache
 from typing import Literal
 
@@ -28,6 +30,7 @@ from app.llm.provider import LLMError, LLMProvider, get_provider
 
 MAX_ATTEMPTS = 2
 FUZZY_CUTOFF = 80
+WARM_INTERVAL_S = 300  # the GPU service stays up ~15 min after a request
 _COORDS = re.compile(r"-?\d{1,3}\.\d+\s*[, ]\s*-?\d{1,3}\.\d+")
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -269,3 +272,44 @@ def respond(history: list[ChatMessage], current: RunRequest | None = None,
                   "so I left it out. Which road did you mean?")
     return ChatReply(reply=reply, params=req, ready=turn.ready_to_run and not unknown,
                      agent="llm")
+
+
+_last_warm = float("-inf")
+_warm_lock = threading.Lock()
+
+
+def claim_warm(now: float | None = None) -> bool:
+    """True if a warm-up is due (none in the last WARM_INTERVAL_S); records it.
+
+    Called by the API before scheduling `warm`, so page loads in quick
+    succession send one warm-up between them, not one each.
+    """
+    global _last_warm
+    now = time.monotonic() if now is None else now
+    with _warm_lock:
+        if now - _last_warm < WARM_INTERVAL_S:
+            return False
+        _last_warm = now
+        return True
+
+
+def warm(provider: LLMProvider | None = None) -> bool:
+    """Wake the LLM before the user's first message.
+
+    A cold GPU service needs ~2 min: instance start, model load and on-the-fly
+    compilation of GPU code, part of which only happens on the first real
+    prompt. So this sends a full agent prompt (same system prompt and schema
+    as a chat turn) rather than an empty request. Errors are ignored.
+
+    Returns:
+        True if the model answered, False if skipped or failed.
+    """
+    try:
+        provider = provider or get_provider()
+        if provider is None:
+            return False
+        hello = [ChatMessage(role="user", content="Hello")]
+        provider.complete(_prompt_messages(hello, RunRequest(), None), llm_schema())
+        return True
+    except LLMError:
+        return False

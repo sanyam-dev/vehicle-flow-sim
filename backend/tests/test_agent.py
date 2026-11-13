@@ -223,3 +223,23 @@ def test_llm_schema_requires_every_field_reply_last():
     assert schema["required"] == list(schema["properties"])
     assert list(schema["properties"])[-1] == "reply"
     assert set(schema["properties"]) == set(agent.AgentTurn.model_fields)
+
+
+# ---- Warm-up before the first chat --------------------------------------------
+
+def test_claim_warm_debounces(monkeypatch):
+    monkeypatch.setattr(agent, "_last_warm", float("-inf"))
+    assert agent.claim_warm(now=1000.0)
+    assert not agent.claim_warm(now=1000.0 + agent.WARM_INTERVAL_S - 1)
+    assert agent.claim_warm(now=1000.0 + agent.WARM_INTERVAL_S)
+
+
+def test_warm_sends_a_full_agent_prompt():
+    llm = FakeProvider(['{"reply": "hi"}'])
+    assert agent.warm(llm)
+    (messages,) = llm.calls
+    assert messages[0]["role"] == "system" and "traffic simulator" in messages[0]["content"]
+
+
+def test_warm_ignores_failures():
+    assert not agent.warm(FakeProvider([LLMError("402")]))

@@ -9,8 +9,12 @@ One turn:
      with the geocoder and road names are matched to the area's roads.
 
 The LLM never produces coordinates: `AgentTurn` has no coordinate fields and
-rejects a place that looks like "lat, lon". If the provider is unavailable
-or keeps answering invalid JSON, the rule-based agent answers instead.
+rejects a place that looks like "lat, lon". Coordinates the USER types are
+read from their messages with a regex (`geocoder.parse_coordinates`) and
+used as the place directly. When no place is known, or the geocoder cannot
+find it, the agent asks for a better name or for coordinates instead of
+guessing. If the provider is unavailable or keeps answering invalid JSON,
+the rule-based agent answers instead.
 """
 
 import json
@@ -55,7 +59,16 @@ Rules:
   list ALL closures requested so far ([] if none or if the user removed them).
 - When known road names are listed below, use those exact names.
 - Ask only when the place is missing or ambiguous; everything else has defaults.
+- If the user gives coordinates (latitude, longitude), the system reads them from the
+  message itself: set place to null and confirm you will simulate around that point.
+  Set place again only when the user later names a different place.
 - Never invent coordinates or road names that the user did not mention."""
+
+ASK_PLACE = ("Which place should I simulate? A junction, road or locality with its city "
+             "works best (e.g. *Silk Board Junction, Bengaluru*). You can also paste "
+             "coordinates as `latitude, longitude` (e.g. `21.170240, 72.831062`).")
+COORDS_HOWTO = ("In Google Maps, right-click the spot and click the numbers at the top "
+                "of the menu to copy them.")
 
 
 class AgentTurn(BaseModel):
@@ -132,9 +145,19 @@ def match_road(name: str, roads: list[str]) -> str | None:
 
 
 def _prompt_messages(history: list[ChatMessage], current: RunRequest,
-                     roads: list[str] | None) -> list[dict]:
-    """System prompt with current parameters and road names, then the history."""
+                     roads: list[str] | None, place_known: bool = True) -> list[dict]:
+    """System prompt with current parameters and road names, then the history.
+
+    Args:
+        history: Conversation, oldest first.
+        current: Parameters in the UI form.
+        roads: Known road names of the current area, if cached.
+        place_known: False when the form has no place (shown as null, so the
+            model takes it from the conversation or asks).
+    """
     ctx = {k: v for k, v in current.model_dump().items() if k not in ("seed", "dt")}
+    if not place_known:
+        ctx["place"] = None
     system = f"{SYSTEM_PROMPT}\n\nCurrent parameters: {json.dumps(ctx)}"
     if roads:
         system += "\nKnown roads in this area: " + "; ".join(roads[:150])
@@ -226,6 +249,18 @@ def _fallback(history: list[ChatMessage], why: str) -> ChatReply:
     return reply.model_copy(update={"reply": reply.reply + note, "agent": "rules"})
 
 
+def not_found_reply(place: str) -> str:
+    """Follow-up question when the geocoder cannot resolve a place."""
+    from app.geo.geocoder import parse_coordinates
+
+    if parse_coordinates(place, whole=True):
+        return (f"There is nothing on OpenStreetMap at **{place}** (sea or empty land?). "
+                "Please check the point; the order is `latitude, longitude`. " + COORDS_HOWTO)
+    return (f"I couldn't find **{place}** on OpenStreetMap. Could you name a nearby "
+            "junction, road or landmark with the city? Or paste its coordinates as "
+            "`latitude, longitude`. " + COORDS_HOWTO)
+
+
 def _check_place(req: RunRequest, roads_before: list[str] | None,
                  place_before: str) -> tuple[list[str] | None, str | None]:
     """Geocode a changed place. Returns (road names or None, error text or None)."""
@@ -236,42 +271,93 @@ def _check_place(req: RunRequest, roads_before: list[str] | None,
     try:
         return known_roads(req.place), None
     except GeocodeError:
-        return None, (f"I couldn't find **{req.place}** on OpenStreetMap. "
-                      "Could you name it differently (e.g. add the city)?")
+        return None, not_found_reply(req.place)
+
+
+def user_coordinates(history: list[ChatMessage]) -> tuple[str | None, bool]:
+    """Coordinates the user typed, as a place string.
+
+    Returns:
+        (place of the latest user message containing coordinates or None,
+         True if that is the user's most recent message).
+    """
+    from app.geo.geocoder import format_coordinates, parse_coordinates
+
+    users = [m for m in history if m.role == "user"]
+    for i in range(len(users) - 1, -1, -1):
+        if ll := parse_coordinates(users[i].content):
+            return format_coordinates(*ll), i == len(users) - 1
+    return None, False
+
+
+def choose_place(history: list[ChatMessage], turn: AgentTurn,
+                 form_place: str | None) -> tuple[str | None, bool]:
+    """Pick the place for this turn without letting the LLM supply coordinates.
+
+    Priority: coordinates in the user's latest message > place named by the
+    LLM this turn > coordinates from an earlier user message > the form's place.
+
+    Args:
+        history: Conversation, oldest first.
+        turn: Validated LLM answer.
+        form_place: Place in the UI form, or None if it is empty.
+    Returns:
+        (place or None if unknown, True if it is coordinates the user just typed).
+    """
+    coords, latest = user_coordinates(history)
+    if coords and latest:
+        return coords, True
+    return turn.place or coords or form_place, False
+
+
+def _finish(turn: AgentTurn, req: RunRequest, roads: list[str] | None,
+            just_typed: bool) -> ChatReply:
+    """Match closure road names to the area and build the reply."""
+    reply, unknown = turn.reply, []
+    if just_typed and not turn.ready_to_run:  # small models may still ask "which place?"
+        reply = f"Got it: I'll simulate around **{req.place}**. Press **Run** to start."
+    if roads:
+        req, unknown = resolve_roads(req, roads)
+    if unknown:
+        reply += (f"\n\nI couldn't find {', '.join(f'**{u}**' for u in unknown)} in this area, "
+                  "so I left it out. Which road did you mean?")
+    ready = (turn.ready_to_run or just_typed) and not unknown
+    return ChatReply(reply=reply, params=req, ready=ready, agent="llm")
 
 
 def respond(history: list[ChatMessage], current: RunRequest | None = None,
-            provider: LLMProvider | None = None) -> ChatReply:
+            provider: LLMProvider | None = None, *, place_known: bool = True) -> ChatReply:
     """Answer one chat turn with the LLM agent (rule-based fallback).
 
     Args:
         history: Whole conversation, oldest first (the agent is stateless).
         current: Parameters currently in the UI form, if any.
         provider: LLM provider; defaults to the one selected in settings.
+        place_known: False if the form's place is empty: the place must then
+            come from the conversation, else the agent asks for it.
     Returns:
-        ChatReply with the validated RunRequest in `params`.
+        ChatReply with the validated RunRequest in `params`, or a question
+        (params None) when the place is missing or cannot be found.
     """
     current = current or RunRequest()
+    form_place = current.place if place_known else None
     try:
         provider = provider or get_provider()
         if provider is None:
             return rules.respond(history).model_copy(update={"agent": "rules"})
-        roads, _ = _check_place(current, None, "")
-        turn = ask_llm(provider, _prompt_messages(history, current, roads))
+        roads = _check_place(current, None, "")[0] if place_known else None
+        turn = ask_llm(provider, _prompt_messages(history, current, roads, place_known))
         req = merge(turn, current)
     except LLMError as exc:
         return _fallback(history, str(exc))
-    roads, place_error = _check_place(req, roads, current.place)
+    place, just_typed = choose_place(history, turn, form_place)
+    if place is None:
+        return ChatReply(reply=ASK_PLACE, params=None, ready=False, agent="llm")
+    req = req.model_copy(update={"place": place})
+    roads, place_error = _check_place(req, roads, form_place or "")
     if place_error:
         return ChatReply(reply=place_error, params=None, ready=False, agent="llm")
-    reply, unknown = turn.reply, []
-    if roads:
-        req, unknown = resolve_roads(req, roads)
-    if unknown:
-        reply += (f"\n\nI couldn't find {', '.join(f'**{u}**' for u in unknown)} in this area, "
-                  "so I left it out. Which road did you mean?")
-    return ChatReply(reply=reply, params=req, ready=turn.ready_to_run and not unknown,
-                     agent="llm")
+    return _finish(turn, req, roads, just_typed)
 
 
 _last_warm = float("-inf")

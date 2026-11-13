@@ -93,7 +93,93 @@ def test_unknown_road_is_dropped_and_asked_about(offline):
 def test_unknown_place_is_reported(offline):
     r = agent.respond(HISTORY, offline, FakeProvider([turn(place=MISSING_PLACE)]))
     assert not r.ready and r.params is None
-    assert "couldn't find" in r.reply
+    assert "couldn't find" in r.reply and "latitude, longitude" in r.reply
+
+
+# ---- missing place, user-typed coordinates -----------------------------------------
+
+POINT = "21.170240, 72.831062"
+
+
+class _Reverse:
+    """httpx.get stand-in answering Nominatim reverse lookups."""
+
+    def __init__(self, payload: dict):
+        self.payload, self.calls = payload, []
+
+    def __call__(self, url, params, **kw):
+        assert url.endswith("/reverse"), url
+        self.calls.append(params)
+        return self
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self.payload
+
+
+@pytest.fixture
+def reverse_ok(offline, monkeypatch):
+    fake = _Reverse({"display_name": "Ring Road, Athwa, Surat, Gujarat, India",
+                     "address": {"country_code": "in"}})
+    monkeypatch.setattr(httpx, "get", fake)
+    return fake
+
+
+def user(*texts) -> list[ChatMessage]:
+    """Conversation alternating user texts with a short assistant answer."""
+    out = []
+    for t in texts:
+        out += [ChatMessage(role="user", content=t), ChatMessage(role="assistant", content="Ok.")]
+    return out[:-1]
+
+
+def test_missing_place_is_asked_for(offline):
+    llm = FakeProvider([turn(place=None, ready_to_run=False, reply="Sure.")])
+    r = agent.respond(user("simulate heavy traffic"), RunRequest(), llm, place_known=False)
+    assert r.params is None and not r.ready
+    assert "Which place" in r.reply and "latitude, longitude" in r.reply
+    assert '"place": null' in llm.calls[0][0]["content"]  # default place not offered
+
+
+def test_place_from_message_when_form_is_empty(offline):
+    llm = FakeProvider([turn(place=TEST_PLACE)])
+    r = agent.respond(user(f"Run simulation for {TEST_PLACE}"), RunRequest(), llm,
+                      place_known=False)
+    assert r.ready and r.params.place == TEST_PLACE
+
+
+def test_typed_coordinates_become_the_place(reverse_ok):
+    llm = FakeProvider([turn(place=None, ready_to_run=False, reply="Which place?")])
+    r = agent.respond(user(f"Simulate around {POINT} at 6pm"), RunRequest(), llm,
+                      place_known=False)
+    assert r.params.place == POINT and r.ready
+    assert "Got it" in r.reply and POINT in r.reply
+    assert reverse_ok.calls and reverse_ok.calls[0]["lat"] == "21.170240"
+
+
+def test_earlier_coordinates_are_kept_until_a_new_place_is_named(reverse_ok):
+    r = agent.respond(user(f"use {POINT}", "make it heavy traffic"), RunRequest(),
+                      FakeProvider([turn(place=None, traffic="high")]), place_known=False)
+    assert (r.params.place, r.params.traffic) == (POINT, "high")
+    r = agent.respond(user(f"use {POINT}", f"actually {TEST_PLACE}"), RunRequest(),
+                      FakeProvider([turn(place=TEST_PLACE)]), place_known=False)
+    assert r.params.place == TEST_PLACE
+
+
+def test_coordinates_in_the_sea_are_questioned(offline, monkeypatch):
+    monkeypatch.setattr(httpx, "get", _Reverse({"error": "Unable to geocode"}))
+    r = agent.respond(user("try 10.000000, 65.000000"), RunRequest(),
+                      FakeProvider([turn(place=None)]), place_known=False)
+    assert r.params is None and "nothing on OpenStreetMap" in r.reply
+
+
+def test_rules_agent_reads_typed_coordinates(offline):
+    from app.api import chat as rules
+
+    r = rules.respond(user(f"heavy traffic at {POINT}"))
+    assert r.params.place == POINT and r.params.traffic == "high"
 
 
 def test_rules_provider_setting(offline, monkeypatch):
@@ -111,6 +197,19 @@ def test_chat_endpoint_uses_llm_agent(client, monkeypatch):
     j = r.json()
     assert j["agent"] == "llm" and j["ready"] and j["reply"] == "Simulating the test grid."
     assert j["params"]["traffic"] == "moderate"
+
+
+def test_chat_with_empty_form_place_is_not_rejected(client, monkeypatch):
+    """Regression: an empty Place box made /api/chat answer 422."""
+    llm = FakeProvider([turn(place=TEST_PLACE)])
+    monkeypatch.setattr(agent, "get_provider", lambda: llm)
+    form = {**RunRequest(place=TEST_PLACE).model_dump(), "place": "", "time": "9am"}
+    r = client.post("/api/chat", json={"messages": [m.model_dump() for m in HISTORY],
+                                       "params": form})
+    assert r.status_code == 200, r.text
+    assert r.json()["params"]["place"] == TEST_PLACE
+    assert '"place": null' in llm.calls[0][0]["content"]
+    assert '"time": "09:00"' in llm.calls[0][0]["content"]  # invalid field -> default
 
 
 # ---- Ollama provider (client calls stubbed) --------------------------------------
@@ -243,3 +342,13 @@ def test_warm_sends_a_full_agent_prompt():
 
 def test_warm_ignores_failures():
     assert not agent.warm(FakeProvider([LLMError("402")]))
+
+
+def test_unexpected_agent_error_becomes_a_question(client, monkeypatch):
+    def broken(*a, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.api.routes.respond", broken)
+    r = client.post("/api/chat", json={"messages": [m.model_dump() for m in HISTORY]})
+    assert r.status_code == 200
+    assert r.json()["agent"] == "error" and "latitude, longitude" in r.json()["reply"]

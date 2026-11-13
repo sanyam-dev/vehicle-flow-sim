@@ -13,6 +13,7 @@ session, keyed by the `X-Session-Id` header, else the client IP); the
 browser replays the recorded frames afterwards.
 """
 
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -26,6 +27,7 @@ from app.llm.agent import respond
 from app.runs import store, worker
 from app.runs.export import chunk_json
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 _SESSION = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
@@ -62,8 +64,18 @@ def health() -> dict:
 
 @router.post("/chat", response_model=ChatReply)
 def chat(body: ChatRequest) -> ChatReply:
-    """Task-understanding agent turn (Ollama LLM, rule-based fallback)."""
-    return respond(body.messages, body.params)
+    """Task-understanding agent turn (Ollama LLM, rule-based fallback).
+
+    Never fails the request: an unexpected error becomes a reply asking the
+    user to rephrase, so the conversation can go on.
+    """
+    try:
+        return respond(body.messages, body.params, place_known=body.form_has_place)
+    except Exception:  # last resort; details go to the server log
+        log.exception("chat turn failed")
+        return ChatReply(reply="Something went wrong on my side while reading that. Could you "
+                               "say it again, naming the place with its city (or pasting "
+                               "coordinates as `latitude, longitude`)?", agent="error")
 
 
 @router.post("/llm/warm", status_code=202)

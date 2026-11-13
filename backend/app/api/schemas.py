@@ -7,7 +7,7 @@ Both the chat endpoint and the hyper-parameter form produce one.
 import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 TrafficLevel = Literal["less", "moderate", "high"]
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
@@ -29,7 +29,8 @@ class RunRequest(BaseModel):
     """One baseline (+ optional scenario) simulation job.
 
     Attributes:
-        place: Place name for the geocoder; never coordinates.
+        place: Place name for the geocoder, or "lat, lon" typed by the user
+            (never coordinates produced by the LLM).
         traffic: Traffic level, or None to derive it from the time of day.
         time: Start time "HH:MM".
         duration_s: Simulated seconds including warm-up.
@@ -85,10 +86,43 @@ class ChatRequest(BaseModel):
     Attributes:
         messages: Chat history, oldest first.
         params: Parameters currently in the UI form (optional context).
+        form_has_place: False when the form's Place box was empty or invalid
+            (set from the raw request; the agent then asks for a place
+            instead of using the default one).
     """
 
     messages: list[ChatMessage] = Field(min_length=1, max_length=60)
     params: RunRequest | None = None
+    form_has_place: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _note_form_place(cls, data):
+        """Record whether the raw form carried a usable place."""
+        if isinstance(data, dict) and isinstance(p := data.get("params"), dict):
+            place = p.get("place")
+            data = {**data, "form_has_place": isinstance(place, str)
+                    and 2 <= len(place.strip()) <= 160}
+        return data
+
+    @field_validator("params", mode="wrap")
+    @classmethod
+    def _lenient_params(cls, v, handler):
+        """Form values are only context: drop invalid fields instead of failing.
+
+        E.g. an empty Place box must not block the chat; the dropped field
+        falls back to its default and the agent fills it from the conversation.
+        """
+        try:
+            return handler(v)
+        except ValidationError as exc:
+            if not isinstance(v, dict):
+                return None
+            bad = {e["loc"][0] for e in exc.errors() if e["loc"]}
+            try:
+                return handler({k: x for k, x in v.items() if k not in bad})
+            except ValidationError:
+                return None
 
 
 class ChatReply(BaseModel):
@@ -98,7 +132,8 @@ class ChatReply(BaseModel):
         reply: Text to show the user.
         params: Extracted run request, or None if nothing actionable yet.
         ready: True when `params` is complete enough to run.
-        agent: Which agent answered: "llm" or "rules" (fallback).
+        agent: Which agent answered: "llm", "rules" (fallback) or "error"
+            (unexpected failure; the reply asks the user to rephrase).
     """
 
     reply: str

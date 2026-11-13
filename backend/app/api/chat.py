@@ -4,13 +4,14 @@ Stands in for the Ollama-backed LLM agent (plan phase 4) so the chat UI
 works end to end in v1. It reads the whole conversation (context lives
 in the request), extracts place / traffic level / time / closures with
 regular expressions, and returns a Pydantic-validated RunRequest. Like
-the LLM version it never produces coordinates: the place name goes to
-the geocoder inside the worker.
+the LLM version it never invents coordinates: the place name (or the
+"lat, lon" the user typed) goes to the geocoder inside the worker.
 """
 
 import re
 
 from app.api.schemas import ChatMessage, ChatReply, LaneClosure, RunRequest
+from app.geo.geocoder import format_coordinates, parse_coordinates
 
 _LEVELS = {"less": ("light", "low", "less", "night", "empty"),
            "moderate": ("moderate", "normal", "medium", "average"),
@@ -57,7 +58,9 @@ def _apply(params: dict, text: str) -> None:
             params.setdefault("close_lanes", []).append(LaneClosure(road=road, lanes=lanes))
         else:
             params.setdefault("close_roads", []).append(road)
-    if (p := _PLACE.search(text)) is not None:
+    if (ll := parse_coordinates(text)) is not None:  # typed by the user, not generated
+        params["place"] = format_coordinates(*ll)
+    elif (p := _PLACE.search(text)) is not None:
         params["place"] = p.group(1).strip()
 
 
@@ -84,6 +87,7 @@ def respond(messages: list[ChatMessage]) -> ChatReply:
             _apply(params, m.content)
     if "place" not in params:
         return ChatReply(reply="Which area should I simulate? For example: "
-                               "*rush hour at Silk Board Junction, Bengaluru*.")
+                               "*rush hour at Silk Board Junction, Bengaluru*, or "
+                               "coordinates as `latitude, longitude`.")
     req = RunRequest(**params)
     return ChatReply(reply=_summary(req) + " Press **Run** to start.", params=req, ready=True)

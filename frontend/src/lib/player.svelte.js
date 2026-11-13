@@ -69,7 +69,7 @@ class Player {
   draw() {
     const src = this.source;
     if (!src || !this.renderer) return false;
-    const pos = this.t / src.meta.frame_dt;
+    const pos = Math.max(this.t, 0) / src.meta.frame_dt;
     const f = Math.min(Math.floor(pos), src.meta.n_frames - 1);
     const a = src.frame(f);
     if (!a) return false;
@@ -80,7 +80,8 @@ class Player {
 
   #tick(now) {
     if (!this.playing) return;
-    const dt = Math.min((now - this.#last) / 1000, 0.25);
+    // rAF timestamps can precede the performance.now() taken in play(): never step backwards.
+    const dt = Math.max(0, Math.min((now - this.#last) / 1000, 0.25));
     this.#last = now;
     const ok = this.draw();
     this.buffering = !ok;

@@ -5,12 +5,16 @@ Rules (from Nominatim's usage policy and CLAUDE.md):
   * every response is cached in SQLite, keyed by the normalised query;
   * a generic User-Agent is sent (no personal contact data).
 
-The LLM never produces coordinates; only this module does.
+The LLM never produces coordinates; only this module does. A place may also
+be "lat, lon" typed by the user (picked out of their message with
+`parse_coordinates`, never from LLM output): the area is then centred on that
+point and Nominatim's reverse lookup supplies a name and the country.
 """
 
 import fcntl
 import json
 import math
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -28,8 +32,34 @@ LEFT_HAND_COUNTRIES = {
 }
 
 
+# "21.170240, 72.831062" (Google Maps "copy coordinates") or "21.17 72.83":
+# both numbers need >= 2 decimals so times or counts are not mistaken for them.
+_LATLON = re.compile(r"(?<![\d.])(-?\d{1,2}\.\d{2,})\s*(?:,\s*|\s+)(-?\d{1,3}\.\d{2,})(?![\d.])")
+
+
 class GeocodeError(RuntimeError):
     """Raised when a place cannot be resolved."""
+
+
+def parse_coordinates(text: str, whole: bool = False) -> tuple[float, float] | None:
+    """Find a "lat, lon" pair in text.
+
+    Args:
+        text: Free text (a user chat message) or a place string.
+        whole: If True, the text must be only the coordinates.
+    Returns:
+        (lat, lon) in degrees, or None if absent or out of range.
+    """
+    m = _LATLON.fullmatch(text.strip()) if whole else _LATLON.search(text)
+    if not m:
+        return None
+    lat, lon = float(m.group(1)), float(m.group(2))
+    return (lat, lon) if -90 <= lat <= 90 and -180 <= lon <= 180 else None
+
+
+def format_coordinates(lat: float, lon: float) -> str:
+    """Canonical place string for a point, e.g. "21.170240, 72.831062"."""
+    return f"{lat:.6f}, {lon:.6f}"
 
 
 class Area(BaseModel):
@@ -84,6 +114,30 @@ def _cache() -> sqlite3.Connection:
     return con
 
 
+def _cached_get(url: str, key: str, params: dict):
+    """GET a Nominatim endpoint through the SQLite cache and the rate limit.
+
+    Args:
+        url: Endpoint URL.
+        key: Cache key (normalised request).
+        params: Query parameters.
+    Returns:
+        Decoded JSON answer (cached or fresh).
+    """
+    con = _cache()
+    row = con.execute("SELECT resp FROM geocode WHERE q = ?", (key,)).fetchone()
+    if row:
+        return json.loads(row[0])
+    with _rate_limit():
+        resp = httpx.get(url, params=params, timeout=20,
+                         headers={"User-Agent": get_settings().user_agent})
+    resp.raise_for_status()
+    data = resp.json()
+    con.execute("INSERT OR REPLACE INTO geocode VALUES (?, ?)", (key, json.dumps(data)))
+    con.commit()
+    return data
+
+
 def search(query: str, **params) -> list[dict]:
     """Nominatim search with caching and rate limiting.
 
@@ -94,20 +148,23 @@ def search(query: str, **params) -> list[dict]:
         List of Nominatim result dicts (may be empty).
     """
     key = json.dumps({"q": " ".join(query.lower().split()), **params}, sort_keys=True)
-    con = _cache()
-    row = con.execute("SELECT resp FROM geocode WHERE q = ?", (key,)).fetchone()
-    if row:
-        return json.loads(row[0])
-    s = get_settings()
     req = {"q": query, "format": "jsonv2", "addressdetails": 1, "limit": 5, **params}
-    with _rate_limit():
-        resp = httpx.get(s.nominatim_url, params=req, timeout=20,
-                         headers={"User-Agent": s.user_agent})
-    resp.raise_for_status()
-    data = resp.json()
-    con.execute("INSERT OR REPLACE INTO geocode VALUES (?, ?)", (key, json.dumps(data)))
-    con.commit()
-    return data
+    return _cached_get(get_settings().nominatim_url, key, req)
+
+
+def reverse(lat: float, lon: float) -> dict:
+    """Nominatim reverse lookup of a point (cached, rate limited).
+
+    Args:
+        lat, lon: Point in degrees.
+    Returns:
+        Nominatim result dict; contains "error" when nothing is there (e.g. sea).
+    """
+    url = get_settings().nominatim_url.rsplit("/", 1)[0] + "/reverse"
+    key = json.dumps({"reverse": format_coordinates(lat, lon)})
+    req = {"lat": f"{lat:.6f}", "lon": f"{lon:.6f}", "format": "jsonv2",
+           "addressdetails": 1, "zoom": 17}
+    return _cached_get(url, key, req)
 
 
 def _bbox_of(result: dict) -> tuple[float, float, float, float]:
@@ -158,12 +215,36 @@ def _border_bbox(place: str, streets: list[str]) -> tuple[float, float, float, f
             max(b[2] for b in boxes), max(b[3] for b in boxes))
 
 
+def _side(country_code: str) -> str:
+    """Driving side of a country ("left"/"right")."""
+    return "left" if country_code in LEFT_HAND_COUNTRIES else "right"
+
+
+def _area_at_point(lat: float, lon: float) -> Area:
+    """Default-size Area centred on a user-given point.
+
+    Raises:
+        GeocodeError: if the point is not on land (no reverse-geocoding result).
+    """
+    s = get_settings()
+    hit = reverse(lat, lon)
+    if not hit or "error" in hit:
+        raise GeocodeError(f"Nothing on OpenStreetMap at {format_coordinates(lat, lon)}")
+    short = ", ".join(p.strip() for p in str(hit.get("display_name", "")).split(",")[:3])
+    name = f"{short} ({lat:.5f}, {lon:.5f})" if short else format_coordinates(lat, lon)
+    bbox = clamp_bbox((lat, lon, lat, lon), s.default_half_side_m, s.max_half_side_m)
+    cc = (hit.get("address") or {}).get("country_code", "")
+    return Area(name=name, south=bbox[0], west=bbox[1], north=bbox[2], east=bbox[3],
+                country_code=cc, driving_side=_side(cc))
+
+
 def resolve_area(place: str, subarea: str | None = None,
                  border_streets: list[str] | None = None) -> Area:
     """Resolve the agent's location spec into a capped simulation Area.
 
     Args:
-        place: City / locality / landmark ("Silk Board Junction, Bengaluru").
+        place: City / locality / landmark ("Silk Board Junction, Bengaluru"),
+            or user-given coordinates "lat, lon".
         subarea: Optional finer place inside `place` ("HSR Layout").
         border_streets: Optional streets bounding the box.
     Returns:
@@ -172,6 +253,8 @@ def resolve_area(place: str, subarea: str | None = None,
         GeocodeError: if nothing matches.
     """
     s = get_settings()
+    if not subarea and not border_streets and (ll := parse_coordinates(place, whole=True)):
+        return _area_at_point(*ll)
     query = f"{subarea}, {place}" if subarea else place
     hits = search(query)
     if not hits:
@@ -182,4 +265,4 @@ def resolve_area(place: str, subarea: str | None = None,
                       s.max_half_side_m)
     cc = (top.get("address") or {}).get("country_code", "")
     return Area(name=query, south=bbox[0], west=bbox[1], north=bbox[2], east=bbox[3],
-                country_code=cc, driving_side="left" if cc in LEFT_HAND_COUNTRIES else "right")
+                country_code=cc, driving_side=_side(cc))

@@ -119,3 +119,46 @@ def test_frames_are_recorded(G, tmp_path):
     out = tmp_path / "baseline"
     assert (out / "meta.json").exists()
     assert len(list(out.glob("chunk_*.npz"))) == 3  # 150 frames / 60 per chunk
+
+
+# ---- geocoder: user-typed coordinates ----------------------------------------------
+
+@pytest.mark.parametrize("text, expected", [
+    ("21.170240, 72.831062", (21.17024, 72.831062)),
+    ("around 21.17 72.83 please", (21.17, 72.83)),
+    ("-33.8688,151.2093", (-33.8688, 151.2093)),
+    ("at 9.30 for 15 min", None),           # one decimal number is not a point
+    ("12, 77", None),                       # integers are not coordinates
+    ("95.00, 10.00", None),                 # latitude out of range
+])
+def test_parse_coordinates(text, expected):
+    from app.geo.geocoder import parse_coordinates
+
+    got = parse_coordinates(text)
+    assert got == (pytest.approx(expected) if expected else None)
+
+
+def test_area_around_typed_coordinates(data_dir, monkeypatch):
+    import httpx
+
+    from app.config import get_settings
+    from app.geo.geocoder import resolve_area
+
+    class Fake:
+        def __call__(self, url, params, **kw):
+            return self
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"display_name": "Gaurav Path Road, Sachin, Surat, Gujarat",
+                    "address": {"country_code": "in"}}
+
+    monkeypatch.setattr(httpx, "get", Fake())
+    a = resolve_area("21.170240, 72.831062")
+    assert (a.south + a.north) / 2 == pytest.approx(21.17024)
+    assert (a.west + a.east) / 2 == pytest.approx(72.831062)
+    half_m = (a.north - a.south) / 2 * 111_320
+    assert half_m == pytest.approx(get_settings().default_half_side_m, rel=1e-3)
+    assert a.driving_side == "left" and a.name.startswith("Gaurav Path Road, Sachin, Surat")

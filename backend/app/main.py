@@ -21,7 +21,7 @@ from app.config import get_settings
 from app.geo.seed import install_seed
 from app.runs import store, worker
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("uvicorn.error")  # shows in uvicorn / Cloud Run logs
 
 
 async def sweep_runs_forever(ttl_s: float, interval_s: float) -> None:

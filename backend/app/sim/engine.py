@@ -148,7 +148,8 @@ class Engine:
                         q.gap, q.v_lead)
         # ... never more restrictive than stopping where the shared space starts.
         to_start = idm_accel(v, self.v0_eff, P["a"][vt], P["b"][vt], P["T"][vt], P["s0"][vt],
-                             np.where(q.dist > 0, q.dist, np.inf), np.zeros(ag.n))
+                             np.where(q.dist > 0, np.maximum(q.room, 0.1), np.inf),
+                             np.zeros(ag.n))
         return np.where(q.dist > 0, np.maximum(acc, to_start), acc)
 
     def _integrate(self, acc: np.ndarray, gap: np.ndarray, v_lead: np.ndarray) -> None:

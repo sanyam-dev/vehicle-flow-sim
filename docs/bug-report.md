@@ -19,14 +19,16 @@ Measurements use the seeded Silk Board graph (`12.9097_77.6175_12.9223_77.6304`)
 | Low      | 4     | 7    |
 
 Collision numbers before and after, moderate traffic, with the original 3 signals so the two
-columns are comparable:
+columns are comparable. Throughput is lower because vehicles now wait for real gaps instead of
+driving through each other; trips that complete are delayed less:
 
 | Measure (600 s) | Before | After |
 |-----------------|--------|-------|
 | Vehicles overlapping the one ahead in their lane (samples) | 245 | 0 |
-| Vehicle pairs drawn closer than 1.2 m | 1,646 | 221 |
-| Steps with braking harder than 4 m/s² | 2,607 | 438 |
-| Throughput (veh/h) | 6,090 | 5,925 |
+| Vehicle pairs drawn closer than 1.2 m | 1,646 | 355 |
+| Steps with braking harder than 4 m/s² | 2,607 | 727 |
+| Throughput (veh/h) | 6,090 | 5,003 |
+| Mean delay per trip (s) | 116.6 | 51.9 |
 
 ## Fixed
 
@@ -38,7 +40,7 @@ columns are comparable:
 | F4 | High | Engine | Nothing stopped a vehicle overlapping its leader after a hand-over between links. | `sim/engine.py` `_separate` | Test `test_no_vehicle_overlaps_its_leader` |
 | F5 | High | Engine | Followers ran red lights. Only the first vehicle in a lane obeyed the signal; a follower became first too late to stop. | `sim/junctions.py` `must_stop_at_signal` | Test `test_no_vehicle_enters_a_junction_on_red` |
 | F6 | High | Engine | Vehicles started slowing for a turn from the far end of the road, because the turn-speed limit was applied at any distance. | `sim/engine.py` `_accelerations` | Code reading, then measured |
-| F7 | High | Geometry | Junction boxes were too small where roads meet at a shallow angle, so the ends of two different roads were drawn on top of each other and waiting vehicles overlapped. | `sim/network_parts.py` `junction_radius` | Measured (947 → 218 pairs) |
+| F7 | High | Geometry | Junction boxes were too small where roads meet at a shallow angle, so the ends of two different roads were drawn on top of each other and waiting vehicles overlapped. | `sim/network_parts.py` `junction_radius` | Measured (947 → about 220 pairs when first fixed) |
 | F8 | Med. | Engine | Lane changes needed only a 0.5 m gap and checked safety for the new follower only, so the changer often had to brake hard. | `sim/mobil.py` `_evaluate` | Hard-brake classification |
 | F9 | Med. | Recorder | A lane change was drawn as a 3.2 m sideways jump. The `mobil.py` docstring said the recorder smooths it; it did not. | `sim/recorder.py` `_lateral`, agent field `lat` | Test `test_lane_change_is_drawn_as_a_drift` |
 | F10 | Med. | Recorder | Vehicles jumped sideways entering and leaving a junction when the turn path had fewer lanes than the road. | `sim/recorder.py` `_lateral` | Code reading |
@@ -65,7 +67,7 @@ columns are comparable:
 | O7 | Med. | Frontend | A failed frame-chunk download is retried on every animation frame (about 60 requests per second) while the player waits. | `lib/frames.js` `load`, `frame` | Request storm when the server is down. | Code reading |
 | O8 | Med. | Frontend | The space bar toggles playback even when a button has focus, and blocks that button's own activation. | `components/Playback.svelte` `onKey` | Keyboard users cannot press buttons with Space. | Code reading |
 | O9 | Low | Frontend | Lane closures are not drawn on the map; only fully closed roads are. | `lib/maplayers.js` | The user cannot see a pending lane closure. | Code reading |
-| O10 | Low | Engine | Hard braking still happens about 590 times in 600 s at moderate traffic (1,000 vehicles), mostly at the start of roads after a junction. | `sim/leaders.py` | Occasional abrupt stops. | Measured |
+| O10 | Low | Engine | Hard braking still happens about 720 times in 600 s at moderate traffic (1,000 vehicles), mostly at the start of roads after a junction. | `sim/leaders.py` | Occasional abrupt stops. | Measured |
 | O11 | Low | API | Without an `X-Session-Id` header the worker is chosen by client address. Behind the Cloud Run proxy, clients without the header can share one worker. | `api/routes.py` `session_key` | Only affects clients other than the bundled frontend. | Code reading |
 | O12 | Low | Geocoder | The SQLite connection of the geocode cache is opened on every call and never closed. | `geo/geocoder.py` `_cached_get` | Small resource leak in long-lived workers. | Code reading |
 | O13 | Low | Demand | An exit's attraction is taken from the first road arriving at it, even if that road is closed. | `sim/demand.py` `_in_edge` | Slightly wrong destination shares in closure scenarios. | Code reading |

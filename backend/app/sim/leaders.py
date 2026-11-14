@@ -30,6 +30,8 @@ from app.sim.junctions import approach_horizon, must_stop_at_signal
 from app.sim.laneindex import LaneIndex, lane_key
 from app.sim.ring import ring_leaders, ring_state
 
+MERGE_SETBACK_M = 4.0  # a vehicle waiting to merge stops this far before the shared space
+
 
 def _look_into(li: LaneIndex, rows: np.ndarray, link: np.ndarray, lane: np.ndarray,
                dist: np.ndarray, gap: np.ndarray, v_lead: np.ndarray) -> np.ndarray:
@@ -96,7 +98,7 @@ class QueueGaps:
     @property
     def room(self) -> np.ndarray:
         """(n,) distance each vehicle may still advance because of its queue leader."""
-        return np.maximum(self.gap, self.dist)
+        return np.maximum(self.gap, self.dist - MERGE_SETBACK_M)
 
     def tighten(self, rows: np.ndarray, gap: np.ndarray, v_lead: np.ndarray,
                 dist: np.ndarray) -> None:
@@ -106,7 +108,7 @@ class QueueGaps:
             rows: (k,) agent rows (each at most once).
             gap, v_lead, dist: (k,) candidate leader values for those rows.
         """
-        closer = np.maximum(gap, dist) < self.room[rows]
+        closer = np.maximum(gap, dist - MERGE_SETBACK_M) < self.room[rows]
         r = rows[closer]
         self.gap[r], self.v_lead[r], self.dist[r] = gap[closer], v_lead[closer], dist[closer]
 

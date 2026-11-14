@@ -21,6 +21,7 @@ import numpy as np
 from app.sim.geometry import LANE_WIDTH_M, side_normal
 
 CHUNK_FRAMES = 60
+LANE_HOLD_SHARE = 0.6  # share of a turn path driven before drifting to the exit lane
 
 
 class FrameRecorder:
@@ -66,7 +67,10 @@ class FrameRecorder:
             m = link[on_mv] - E
             a = (lanes[net.mv_in[m]] / 2 - lat[on_mv] - 0.5) * LANE_WIDTH_M
             b = (lanes[net.mv_out[m]] / 2 - ag.view("next_lane")[on_mv] - 0.5) * LANE_WIDTH_M
+            # Hold the lane through the junction and move over in the last part,
+            # when vehicles heading for the same lane have lined up behind each other.
             u = np.clip(pos[on_mv] / net.link_len[link[on_mv]], 0.0, 1.0)
+            u = np.clip((u - LANE_HOLD_SHARE) / (1.0 - LANE_HOLD_SHARE), 0.0, 1.0)
             out[on_mv] = a + (b - a) * (u * u * (3 - 2 * u))
             ring = net.mv_ring[m]
             if ring.any():

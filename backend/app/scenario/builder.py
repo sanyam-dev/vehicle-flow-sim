@@ -112,6 +112,8 @@ def _usage_text(kind: str, vehicles: int, extra: dict) -> str:
     if kind == "add_lane":
         return f"{vehicles} vehicles on the widened road, {extra['new_lane_s']} s in the new lane"
     if kind in ("close_road", "close_edge"):
+        if not extra["edges"]:
+            return "no matching road in this area: nothing was closed"
         return f"{vehicles} vehicles entered (closed)"
     if kind == "close_lanes":
         return f"{extra['closed_lane_s']} s spent in closed lanes"
@@ -139,7 +141,8 @@ def edit_usage(manifest: list[dict], net, summary: dict) -> list[dict]:
         ids = [edge_of[k] for k in m.get("edges", []) if k in edge_of]
         vehicles = sum(use["edge_entries"][e] for e in ids)
         extra = {"closed_lane_s": use["closed_lane_seconds"], "red_entries": use["red_entries"],
-                 "new_lane_s": sum(use["lane_seconds"][e][-1] for e in ids), "delay_s": None}
+                 "new_lane_s": sum(use["lane_seconds"][e][-1] for e in ids), "delay_s": None,
+                 "edges": len(ids)}
         if "node" in m:
             row = by_node.get(node_of.get(m["node"], -1), {})
             vehicles, extra["delay_s"] = row.get("vehicles", 0), row.get("delay_mean_s")

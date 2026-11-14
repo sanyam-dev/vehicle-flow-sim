@@ -24,7 +24,7 @@ from app.geo.lanes import (
     speed_limit_ms,
 )
 from app.sim.geometry import GeomTable, drop_end_hooks, polyline_length, substring
-from app.sim.movements import LAST_LANE, EdgeShape, Movements, build_movements
+from app.sim.movements import LAST_LANE, RING_SHARE, EdgeShape, Movements, build_movements
 from app.sim.network_parts import (
     boundary_nodes,
     closures_of,
@@ -79,6 +79,10 @@ class Network:
     mv_conflict_own: list[np.ndarray]
     mv_shared: np.ndarray
     mv_ring: np.ndarray
+    mv_ring_s0: np.ndarray
+    mv_ring_in: np.ndarray
+    mv_ring_len: np.ndarray
+    node_ring_circ: np.ndarray
     mv_cross: list[np.ndarray]
     mv_cross_s: list[np.ndarray]
     mv_cross_own: list[np.ndarray]
@@ -304,14 +308,19 @@ def compile_network(G: nx.MultiDiGraph, base: Network | None = None) -> Network:
     return _assemble(G, parts, mv, side, base)
 
 
-def _shared_lengths(mv: Movements, kind: np.ndarray) -> np.ndarray:
+def _shared_lengths(mv: Movements, on_ring: np.ndarray) -> np.ndarray:
     """(M,) length over which turn paths leaving one in-edge lane share road space.
 
-    Ordinary turns separate within DIVERGE_SHARED_M; on a roundabout they
-    share the ring, so a vehicle follows the one ahead for its whole path.
+    Ordinary turns separate within DIVERGE_SHARED_M. Roundabout paths share
+    their entry up to the ring; on the ring itself `sim.ring` orders traffic.
     """
-    on_ring = kind[np.asarray(mv.node, dtype=int)] == ROUNDABOUT if mv.node else np.zeros(0, bool)
-    return np.where(on_ring, np.asarray(mv.length, dtype=float), DIVERGE_SHARED_M)
+    return np.where(on_ring, np.asarray(mv.ring_in, dtype=float), DIVERGE_SHARED_M)
+
+
+def _crossing_only(values: list[np.ndarray], crossing: list[np.ndarray],
+                   on_ring: np.ndarray) -> list[np.ndarray]:
+    """Per movement, keep the entries of crossing conflicts (none on a roundabout)."""
+    return [v[:0] if ring else v[x] for v, x, ring in zip(values, crossing, on_ring, strict=True)]
 
 
 def _assemble(G, parts: tuple, mv: Movements, side: str, base: Network | None) -> Network:
@@ -326,6 +335,8 @@ def _assemble(G, parts: tuple, mv: Movements, side: str, base: Network | None) -
     base_labels = dict(zip(base.node_id.tolist(), base.node_label, strict=True)) if base else {}
     node_label, edge_road = labels_for(rows, xy, kind, BOUNDARY, JUNCTION_KINDS,
                                        node_ids.tolist(), base_labels)
+    on_ring = (kind[np.asarray(mv.node, dtype=int)] == ROUNDABOUT if M
+               else np.zeros(0, dtype=bool))
     usable = ~attrs["closed"]
     has_out = np.bincount(frm[:E][usable], minlength=len(xy)) > 0
     has_in = np.bincount(to[:E][usable], minlength=len(xy)) > 0
@@ -347,11 +358,14 @@ def _assemble(G, parts: tuple, mv: Movements, side: str, base: Network | None) -
         mv_node=np.asarray(mv.node, np.int32), mv_turn=np.asarray(mv.turn, np.int8),
         mv_pref=np.asarray(mv.pref_lane, np.int8), mv_conflicts=mv.conflicts,
         mv_conflict_s=mv.conflict_s, mv_conflict_own=mv.conflict_own,
-        mv_shared=_shared_lengths(mv, kind),
-        mv_ring=kind[np.asarray(mv.node, dtype=int)] == ROUNDABOUT,
-        mv_cross=[c[x] for c, x in zip(mv.conflicts, mv.crossing, strict=True)],
-        mv_cross_s=[c[x] for c, x in zip(mv.conflict_s, mv.crossing, strict=True)],
-        mv_cross_own=[c[x] for c, x in zip(mv.conflict_own, mv.crossing, strict=True)],
+        mv_shared=_shared_lengths(mv, on_ring),
+        mv_ring=on_ring, mv_ring_s0=np.asarray(mv.ring_s0), mv_ring_in=np.asarray(mv.ring_in),
+        mv_ring_len=np.asarray(mv.ring_len),
+        node_ring_circ=2 * np.pi * RING_SHARE * np.maximum(radius, 1.0),
+        # Ring traffic is ordered by `sim.ring`, not by crossing conflicts.
+        mv_cross=_crossing_only(mv.conflicts, mv.crossing, on_ring),
+        mv_cross_s=_crossing_only(mv.conflict_s, mv.crossing, on_ring),
+        mv_cross_own=_crossing_only(mv.conflict_own, mv.crossing, on_ring),
         mv_index={(a, b): i for i, (a, b) in enumerate(zip(mv.m_in, mv.m_out, strict=True))},
         geom=GeomTable(pts + mv.paths),
         entries=np.flatnonzero(boundary & has_out), exits=np.flatnonzero(boundary & has_in),

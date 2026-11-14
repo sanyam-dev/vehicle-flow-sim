@@ -151,11 +151,16 @@ def add_grade_road(G: nx.MultiDiGraph, a: int, b: int, kind: str, lanes: int) ->
 
 
 def _open_path(G: nx.MultiDiGraph, a: int, b: int) -> list[EdgeKey]:
-    """Shortest open (not closed) directed path a -> b as edges; [] if none."""
+    """Shortest directed path a -> b over existing open roads, as edges; [] if none.
+
+    Closed roads and roads added by the scenario itself are not used: an
+    extra lane widens the roads that are already there.
+    """
     H = nx.DiGraph()
     for u, v, k, d in G.edges(keys=True, data=True):
         w = float(d.get("length", 1.0))
-        if u != v and not d.get("closed") and (not H.has_edge(u, v) or w < H[u][v]["w"]):
+        usable = u != v and not d.get("closed") and not d.get("added")
+        if usable and (not H.has_edge(u, v) or w < H[u][v]["w"]):
             H.add_edge(u, v, w=w, key=k)
     try:
         nodes = nx.shortest_path(H, a, b, weight="w")

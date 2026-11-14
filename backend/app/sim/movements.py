@@ -81,6 +81,11 @@ class Movements:
     conflict_s: list[np.ndarray] = field(default_factory=list)
     # conflict_own[a][j]: distance along movement a itself to that conflict point
     conflict_own: list[np.ndarray] = field(default_factory=list)
+    # Roundabout paths: ring coordinate (m) where the path joins the ring, distance
+    # along the path before it joins, and distance it stays on the ring (0 elsewhere).
+    ring_s0: list[float] = field(default_factory=list)
+    ring_in: list[float] = field(default_factory=list)
+    ring_len: list[float] = field(default_factory=list)
     # crossing[a][j]: True where the paths cross, False for a pure merge into one out-edge
     crossing: list[np.ndarray] = field(default_factory=list)
     # nodes where two paths cross (not just merge): these need a control
@@ -145,7 +150,7 @@ def _path(edges: EdgeShape, e_in: int, e_out: int, node_xy: np.ndarray,
 
 
 def _circle_path(edges: EdgeShape, e_in: int, e_out: int, centre: np.ndarray,
-                 radius: float, side: str) -> np.ndarray:
+                 radius: float, side: str) -> tuple[np.ndarray, tuple[float, float, float]]:
     """Turn path around a roundabout island.
 
     The vehicle joins the ring, circulates in the driving direction
@@ -158,7 +163,9 @@ def _circle_path(edges: EdgeShape, e_in: int, e_out: int, centre: np.ndarray,
         radius: Junction radius (m); the ring is RING_SHARE of it.
         side: Driving side.
     Returns:
-        (K, 2) polyline from the in-edge end to the out-edge start.
+        ((K, 2) polyline from the in-edge end to the out-edge start,
+         (ring coordinate of the joining point, path length before it,
+          path length on the ring), all in metres).
     """
     d_in, d_out = _headings(edges, e_in, e_out)
     p0 = edges.pts[e_in][-1] + side_normal(d_in, side) * _carriageway_offset(edges, e_in)
@@ -170,8 +177,11 @@ def _circle_path(edges: EdgeShape, e_in: int, e_out: int, centre: np.ndarray,
     join = min(RING_JOIN_RAD, sweep / 3)
     n = max(2, int(np.ceil((sweep - 2 * join) / RING_STEP_RAD)) + 1)
     ang = a0 + sgn * np.linspace(join, sweep - join, n)
-    ring = centre + RING_SHARE * radius * np.stack([np.cos(ang), np.sin(ang)], axis=1)
-    return np.vstack([p0, ring, p1])
+    r = RING_SHARE * radius
+    ring = centre + r * np.stack([np.cos(ang), np.sin(ang)], axis=1)
+    s0 = float(((sgn * a0 + join) % (2 * np.pi)) * r)
+    return np.vstack([p0, ring, p1]), (s0, float(np.linalg.norm(ring[0] - p0)),
+                                       polyline_length(ring))
 
 
 def _add_movement(mv: Movements, edges: EdgeShape, e_in: int, e_out: int,
@@ -195,10 +205,12 @@ def _add_movement(mv: Movements, edges: EdgeShape, e_in: int, e_out: int,
     width = int(min(edges.lanes[e_in], edges.lanes[e_out]))
     lanes = {STRAIGHT: width, UTURN: 1}.get(turn, min(width, MAX_TURN_LANES))
     if circle_r > 0:  # one circulating lane, everybody slow
-        path = _circle_path(edges, e_in, e_out, node_xy, circle_r, side)
+        path, ring = _circle_path(edges, e_in, e_out, node_xy, circle_r, side)
         vmax, lanes = min(edges.vmax[e_in], edges.vmax[e_out], ROUNDABOUT_SPEED_MS), 1
     else:
-        path = _path(edges, e_in, e_out, node_xy, side)
+        path, ring = _path(edges, e_in, e_out, node_xy, side), (0.0, 0.0, 0.0)
+    for lst, val in zip((mv.ring_s0, mv.ring_in, mv.ring_len), ring, strict=True):
+        lst.append(val)
     mv.m_in.append(e_in)
     mv.m_out.append(e_out)
     mv.node.append(node)

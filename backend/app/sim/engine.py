@@ -136,18 +136,20 @@ class Engine:
     def _queue_accel(self, nxt: np.ndarray) -> np.ndarray:
         """Acceleration limit from vehicles on other turn paths (merge / diverge).
 
-        Until the shared space starts, the follower brakes comfortably at most,
-        or as hard as needed to stop before the shared space. Also stores the
+        Until the shared space starts, the follower may always drive up to
+        where it starts (as if that were a stop line). Also stores the
         room each vehicle has (`self.queue_room`) for the integration clamp.
         """
         ag, P = self.ag, self.params
         vt, v = ag.view("vtype"), ag.view("speed")
         q = junction_queues(self, nxt)
-        self.queue_room = np.maximum(q.gap, q.dist)
+        self.queue_room = q.room
         acc = idm_accel(v, self.v0_eff, P["a"][vt], P["b"][vt], P["T"][vt], P["s0"][vt],
                         q.gap, q.v_lead)
-        floor = -np.maximum(P["b"][vt], v**2 / (2 * np.maximum(q.dist, 0.5)))
-        return np.where(q.dist > 0, np.maximum(acc, floor), acc)
+        # ... never more restrictive than stopping where the shared space starts.
+        to_start = idm_accel(v, self.v0_eff, P["a"][vt], P["b"][vt], P["T"][vt], P["s0"][vt],
+                             np.where(q.dist > 0, q.dist, np.inf), np.zeros(ag.n))
+        return np.where(q.dist > 0, np.maximum(acc, to_start), acc)
 
     def _integrate(self, acc: np.ndarray, gap: np.ndarray, v_lead: np.ndarray) -> None:
         """Ballistic position/speed update (v >= 0) that never overruns the leader."""

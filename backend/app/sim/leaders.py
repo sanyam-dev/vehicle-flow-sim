@@ -28,6 +28,7 @@ import numpy as np
 
 from app.sim.junctions import approach_horizon, must_stop_at_signal
 from app.sim.laneindex import LaneIndex, lane_key
+from app.sim.ring import ring_leaders, ring_state
 
 
 def _look_into(li: LaneIndex, rows: np.ndarray, link: np.ndarray, lane: np.ndarray,
@@ -72,11 +73,7 @@ def _queue_gaps(rows: np.ndarray, key: np.ndarray, x: np.ndarray, length: np.nda
     f, a = order[:-1], order[1:]  # follower, vehicle ahead
     same = key[f] == key[a]
     f, a = f[same], a[same]
-    g = x[a] - length[a] - x[f]
-    # On a tie the nearer shared space wins (it limits the follower sooner).
-    closer = (g < q.gap[rows[f]]) | ((g <= q.gap[rows[f]] + 1e-9) & (dist[f] < q.dist[rows[f]]))
-    f, a, g = f[closer], a[closer], g[closer]
-    q.gap[rows[f]], q.v_lead[rows[f]], q.dist[rows[f]] = g, speed[a], dist[f]
+    q.tighten(rows[f], x[a] - length[a] - x[f], speed[a], dist[f])
 
 
 @dataclass
@@ -85,6 +82,7 @@ class QueueGaps:
 
     Attributes:
         gap: (n,) gap to that leader once both are in the shared space (inf if none).
+            Of several candidates the one leaving the least room is kept.
         v_lead: (n,) its speed.
         dist: (n,) distance before the shared space starts (0 = already shared).
             Until then the follower only needs to brake comfortably, or as
@@ -94,6 +92,23 @@ class QueueGaps:
     gap: np.ndarray
     v_lead: np.ndarray
     dist: np.ndarray
+
+    @property
+    def room(self) -> np.ndarray:
+        """(n,) distance each vehicle may still advance because of its queue leader."""
+        return np.maximum(self.gap, self.dist)
+
+    def tighten(self, rows: np.ndarray, gap: np.ndarray, v_lead: np.ndarray,
+                dist: np.ndarray) -> None:
+        """Keep, per vehicle, the leader that leaves it the least room.
+
+        Args:
+            rows: (k,) agent rows (each at most once).
+            gap, v_lead, dist: (k,) candidate leader values for those rows.
+        """
+        closer = np.maximum(gap, dist) < self.room[rows]
+        r = rows[closer]
+        self.gap[r], self.v_lead[r], self.dist[r] = gap[closer], v_lead[closer], dist[closer]
 
 
 def junction_queues(eng, nxt: np.ndarray) -> QueueGaps:
@@ -120,7 +135,11 @@ def junction_queues(eng, nxt: np.ndarray) -> QueueGaps:
     to_out = np.where(on_mv[rows], rem, rem + net.link_len[mv])
     ring = net.mv_ring[mv - E]  # a roundabout ring is one lane: everybody queues in it
     key = lane_key(net.mv_out[mv - E], np.where(ring, 0, ag.next_lane[rows]))
-    _queue_gaps(rows, key, -to_out, length, speed, ag.vid[rows], to_out, q)
+    # A ring orders its own traffic (sim.ring); only vehicles on the ring or
+    # leaving it queue for the exit.
+    sel = np.flatnonzero(~ring | (on_mv[rows] & (pos[rows] >= net.mv_ring_in[mv - E])))
+    _queue_gaps(rows[sel], key[sel], -to_out[sel], length[sel], speed[sel], ag.vid[rows[sel]],
+                to_out[sel], q)
     # Diverge: same in-edge lane, until the rear of the one ahead leaves the shared part.
     x = np.where(on_mv[rows], pos[rows], -rem)
     lane_in = np.where(ring, 0, np.where(on_mv[rows], ag.lane_in[rows], ag.lane[rows]))
@@ -132,6 +151,10 @@ def junction_queues(eng, nxt: np.ndarray) -> QueueGaps:
     mv_lane = np.where(on_mv[rows], ag.lane[rows], net.movement_lane(mv, ag.lane[rows]))
     _queue_gaps(rows, lane_key(mv, mv_lane), x, length, speed, ag.vid[rows],
                 np.where(on_mv[rows], 0.0, rem), q)
+    # Roundabouts: follow the nearest vehicle ahead on the ring.
+    r_rows, r_gap, r_v, r_dist = ring_leaders(eng, ring_state(eng, nxt))
+    if len(r_rows):
+        q.tighten(r_rows.astype(np.int64), r_gap, r_v, r_dist)
     return q
 
 

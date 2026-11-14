@@ -29,6 +29,7 @@ import numpy as np
 
 from app.sim.laneindex import MAX_KEY_LANES, LaneIndex, lane_key
 from app.sim.movements import ANY_LANE, LAST_LANE
+from app.sim.ring import RingState, entry_blocked, ring_state
 from app.sim.signals import AMBER, RED
 
 STARVATION_S = 15.0
@@ -183,7 +184,8 @@ def _occupancy(eng, nxt: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray
     return rear_min, eta_min, exit_t, reserved
 
 
-def _revalidate_grants(eng, nxt: np.ndarray, rear_min: np.ndarray, exit_t: np.ndarray) -> None:
+def _revalidate_grants(eng, nxt: np.ndarray, rear_min: np.ndarray, exit_t: np.ndarray,
+                       st: RingState) -> None:
     """Withdraw grants whose junction will still be occupied on arrival.
 
     A granted vehicle keeps its grant unless a conflicting movement holds a
@@ -194,15 +196,20 @@ def _revalidate_grants(eng, nxt: np.ndarray, rear_min: np.ndarray, exit_t: np.nd
         eng: Engine.
         nxt: (n,) next link per agent.
         rear_min, exit_t: (M,) outputs of `_occupancy`.
+        st: Ring state (a ring entry is re-checked with the ring's entry rule).
     """
     ag, net, P = eng.ag, eng.net, eng.params
     for i in np.flatnonzero(ag.view("granted") & (ag.view("link") < net.n_edges)):
         m = int(nxt[i] - net.n_edges)
         conf = net.mv_cross[m]
-        if len(conf) == 0:
-            continue
         v, vt = ag.speed[i], ag.vtype[i]
         rem = net.link_len[ag.link[i]] - ag.pos[i]
+        if net.mv_ring[m]:
+            if rem > v**2 / (2 * FIRM_DECEL) + 1.0 and entry_blocked(eng, st, i, m, rem):
+                ag.granted[i] = False
+            continue
+        if len(conf) == 0:
+            continue
         eta = float(time_to_cover(rem, v, P["a"][vt], max(v, net.link_vmax[ag.link[i]])))
         busy = (rear_min[conf] < net.mv_cross_s[m] + CLEAR_MARGIN_M) & (exit_t[conf] > eta)
         if busy.any() and rem > v**2 / (2 * FIRM_DECEL) + 1.0:
@@ -210,7 +217,7 @@ def _revalidate_grants(eng, nxt: np.ndarray, rear_min: np.ndarray, exit_t: np.nd
 
 
 def _conflict_blocked(eng, i: int, m: int, rem: float, rear_min: np.ndarray,
-                      eta_min: np.ndarray) -> bool:
+                      eta_min: np.ndarray, st: RingState) -> bool:
     """True if agent `i` must not enter movement `m` because of conflicting traffic.
 
     Args:
@@ -219,8 +226,11 @@ def _conflict_blocked(eng, i: int, m: int, rem: float, rear_min: np.ndarray,
         m: Movement index.
         rem: Distance from the vehicle's front to its stop line (m).
         rear_min, eta_min: (M,) outputs of `_occupancy`.
+        st: Ring state (roundabout movements use the ring's entry rule).
     """
     ag, net, P = eng.ag, eng.net, eng.params
+    if net.mv_ring[m]:
+        return entry_blocked(eng, st, i, m, rem)
     conf = net.mv_cross[m]
     if len(conf) == 0:
         return False
@@ -245,9 +255,11 @@ def admit(eng, li: LaneIndex, nxt: np.ndarray) -> None:
     stop = must_stop_at_signal(eng, nxt)
     _revoke_on_red(eng, stop)
     rear_min, eta_min, exit_t, reserved = _occupancy(eng, nxt)
-    _revalidate_grants(eng, nxt, rear_min, exit_t)
+    _revalidate_grants(eng, nxt, rear_min, exit_t, ring_state(eng, nxt))
     rear_min, eta_min, exit_t, reserved = _occupancy(eng, nxt)
+    st = ring_state(eng, nxt)
     claimed = np.zeros(net.n_movements, dtype=bool)
+    ring_used = set()  # one new entry per roundabout and step keeps `st` valid
     for i in _candidates(eng, li, nxt):
         m = int(nxt[i] - net.n_edges)
         vt, v = ag.vtype[i], ag.speed[i]
@@ -256,7 +268,9 @@ def admit(eng, li: LaneIndex, nxt: np.ndarray) -> None:
         signalised = eng.plans.mv_ctrl[m] >= 0
         if stop[i]:
             continue
-        blocked = _conflict_blocked(eng, i, m, rem, rear_min, eta_min)
+        blocked = _conflict_blocked(eng, i, m, rem, rear_min, eta_min, st)
+        if net.mv_ring[m]:
+            blocked = blocked or int(net.mv_node[m]) in ring_used
         if not signalised:
             blocked = blocked or claimed[net.mv_cross[m]].any()
         e_out = int(net.mv_out[m])
@@ -269,6 +283,8 @@ def admit(eng, li: LaneIndex, nxt: np.ndarray) -> None:
             eta_min[m] = min(eta_min[m], float(time_to_cover(rem, v, P["a"][vt], vmax)))
             reserved[e_out * MAX_KEY_LANES + lane] += need
             claimed[m] = True
+            if net.mv_ring[m]:
+                ring_used.add(int(net.mv_node[m]))
         elif (not signalised and space.max() >= need
               and (rem < CLAIM_DIST_M or rem / max(v, 0.5) < CLAIM_ETA_S)):
             # Only a vehicle that could actually go claims; one stuck behind a

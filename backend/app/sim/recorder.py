@@ -68,7 +68,28 @@ class FrameRecorder:
             b = (lanes[net.mv_out[m]] / 2 - ag.view("next_lane")[on_mv] - 0.5) * LANE_WIDTH_M
             u = np.clip(pos[on_mv] / net.link_len[link[on_mv]], 0.0, 1.0)
             out[on_mv] = a + (b - a) * (u * u * (3 - 2 * u))
+            ring = net.mv_ring[m]
+            if ring.any():
+                out[on_mv[ring]] = self._ring_lateral(m[ring], pos[on_mv[ring]], a[ring], b[ring])
         return out
+
+    def _ring_lateral(self, m: np.ndarray, pos: np.ndarray, a: np.ndarray,
+                      b: np.ndarray) -> np.ndarray:
+        """Lateral offset on a roundabout path: the ring itself is one lane (offset 0).
+
+        Args:
+            m: (k,) ring movements.
+            pos: (k,) distance along each path.
+            a, b: (k,) lane offsets on the approach and on the exit road.
+        Returns:
+            (k,) offsets: `a` fading to 0 over the entry, 0 on the ring, 0 to `b` over the exit.
+        """
+        net = self.net
+        r_in, r_len = net.mv_ring_in[m], net.mv_ring_len[m]
+        out_len = np.maximum(net.link_len[net.n_edges + m] - r_in - r_len, 0.5)
+        entering = np.clip(1.0 - pos / np.maximum(r_in, 0.5), 0.0, 1.0)
+        leaving = np.clip((pos - r_in - r_len) / out_len, 0.0, 1.0)
+        return a * entering + b * leaving
 
     def _positions(self, ag) -> tuple[np.ndarray, np.ndarray]:
         """Projected (x, y) with lane offset, and unit directions of all agents."""

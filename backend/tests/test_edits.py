@@ -10,7 +10,7 @@ from app.scenario.edits import EditError
 from app.sim.engine import Engine, SimConfig
 from app.sim.movements import ROUNDABOUT_SPEED_MS
 from app.sim.network import PRIORITY, ROUNDABOUT, SIGNAL, compile_network
-from app.sim.recorder import FrameRecorder
+from app.sim.ring import ring_state
 from app.sim.runner import od_rates, prepare_baseline, prepare_scenario, run_pair
 from app.sim.signals import RED, build_signal_plans, movement_states, phase_timing, red_time
 from tests.synthetic import GRID_STEP_M, grid, latlon, merge
@@ -173,23 +173,25 @@ def test_circle_has_no_signal_and_vehicles_circulate_slowly(G):
     assert net.node_kind[centre] == ROUNDABOUT and centre not in scen.plans.nodes.tolist()
     assert net.node_label[centre] == base.net.node_label[centre]
     eng = Engine(net, scen.routes, schedule, scen.plans, CFG)
-    rec = FrameRecorder(net, None)
     ring = np.flatnonzero(net.mv_node == centre) + net.n_edges
-    seen, v_max, closest = 0, 0.0, np.inf
+    seen, v_max, tightest = 0, 0.0, np.inf
     while eng.t < CFG.duration_s - 1e-9:
         eng.step()
         inside = np.flatnonzero(np.isin(eng.ag.view("link"), ring))
         seen += len(inside)
         if len(inside):
             v_max = max(v_max, float((eng.ag.speed[inside] / eng.ag.speed_factor[inside]).max()))
-        if len(inside) > 1:
-            xy, d = rec._positions(eng.ag)
-            c = (xy - d * eng.params["length"][eng.ag.view("vtype")][:, None] / 2)[inside]
-            dist = np.hypot(c[:, None, 0] - c[None, :, 0], c[:, None, 1] - c[None, :, 1])
-            closest = min(closest, float(dist[np.triu_indices(len(c), 1)].min()))
+        st = ring_state(eng, eng._next_links())
+        on = np.flatnonzero(st.inside & (st.to_join <= 0))  # vehicles on the ring itself
+        if len(on) > 1:
+            order = on[np.argsort(st.s[on])]
+            ahead = np.roll(order, -1)
+            length = eng.params["length"][eng.ag.vtype[st.rows[ahead]]]
+            gaps = (st.s[ahead] - st.s[order]) % st.circ[order] - length
+            tightest = min(tightest, float(gaps.min()))
     assert seen > 200
     assert v_max <= ROUNDABOUT_SPEED_MS + 2.0  # entry overshoot only; the ring is 20 km/h
-    assert closest > 1.2
+    assert tightest > -0.5  # single file: nobody overlaps the vehicle ahead on the ring
     assert eng.metrics.overlaps == 0
 
 

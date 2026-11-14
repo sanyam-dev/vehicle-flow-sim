@@ -10,6 +10,7 @@
 #   PROJECT_ID=my-project ./deploy/gcp/deploy-ollama.sh   # chat LLM, once
 #   PROJECT_ID=my-project ./deploy/gcp/deploy.sh
 #   (optional) REGION=asia-south1 SERVICE=vfsim
+#   SKIP_SETUP=1 skips enabling APIs / IAM (used by .github/workflows/ci-cd.yml)
 #
 # Why these Cloud Run flags:
 #   --no-cpu-throttling  simulations keep running in worker processes after
@@ -32,15 +33,18 @@ SERVICE="${SERVICE:-vfsim}"
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 gcloud config set project "$PROJECT_ID"
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com
-
-# New projects no longer give the default compute service account (which Cloud
-# Build uses for source deploys) the rights to read sources and push images.
-PNUM="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${PNUM}-compute@developer.gserviceaccount.com" \
-  --role=roles/run.builder --condition=None >/dev/null
+# One-time project setup; CI (SKIP_SETUP=1) deploys with an account that
+# may not enable APIs or change project IAM.
+if [ "${SKIP_SETUP:-0}" != "1" ]; then
+  gcloud services enable run.googleapis.com cloudbuild.googleapis.com \
+    artifactregistry.googleapis.com
+  # New projects no longer give the default compute service account (which Cloud
+  # Build uses for source deploys) the rights to read sources and push images.
+  PNUM="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${PNUM}-compute@developer.gserviceaccount.com" \
+    --role=roles/run.builder --condition=None >/dev/null
+fi
 
 # Chat LLM: the private Ollama GPU service from deploy-ollama.sh, called with
 # the app's Google ID token. Without it the chat uses the keyword parser.

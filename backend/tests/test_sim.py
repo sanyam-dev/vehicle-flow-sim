@@ -162,3 +162,64 @@ def test_area_around_typed_coordinates(data_dir, monkeypatch):
     half_m = (a.north - a.south) / 2 * 111_320
     assert half_m == pytest.approx(get_settings().default_half_side_m, rel=1e-3)
     assert a.driving_side == "left" and a.name.startswith("Gaurav Path Road, Sachin, Surat")
+
+
+@pytest.mark.parametrize("level", ["less", "moderate", "high"])
+def test_no_vehicle_overlaps_its_leader(G, level):
+    """At every traffic level no vehicle ever overlaps the one ahead in its lane,
+    and the separation safety net itself is never needed."""
+    from app.sim.engine import Engine
+
+    base, schedule, _ = prepare_baseline(G, level, 9.0, CFG)
+    eng = Engine(base.net, base.routes, schedule, base.plans, CFG)
+    worst = 0.0
+    while eng.t < CFG.duration_s - 1e-9:
+        eng.step()
+        li = eng._index()
+        own = li.own_leader()
+        has = own >= 0
+        gap = li.pos[own[has]] - li.length[own[has]] - eng.ag.view("pos")[has]
+        worst = min(worst, float(gap.min()) if has.any() else 0.0)
+    assert worst > -0.1
+    assert eng.metrics.overlaps == 0 and eng.metrics.overlap_fixes == 0
+
+
+def test_braking_stays_within_the_emergency_limit(G):
+    """No vehicle decelerates harder than the model's limit, and hard braking is rare."""
+    from app.sim.engine import Engine
+    from app.sim.idm import MAX_DECEL
+
+    base, schedule, _ = prepare_baseline(G, "moderate", 9.0, CFG)
+    eng = Engine(base.net, base.routes, schedule, base.plans, CFG)
+    steps = hard = 0
+    while eng.t < CFG.duration_s - 1e-9:
+        v0 = dict(zip(eng.ag.view("vid").tolist(), eng.ag.view("speed").tolist(), strict=True))
+        eng.step()
+        for vid, v in zip(eng.ag.view("vid").tolist(), eng.ag.view("speed").tolist(),
+                          strict=True):
+            if vid in v0:
+                steps += 1
+                hard += (v0[vid] - v) / CFG.dt > MAX_DECEL + 0.5
+    assert steps > 10_000
+    assert hard / steps < 0.002
+
+
+def test_lane_change_is_drawn_as_a_drift(G):
+    """The drawn lateral position moves at most a fraction of a lane per step."""
+    from app.sim.engine import LANE_CHANGE_S, Engine
+
+    base, schedule, _ = prepare_baseline(G, "moderate", 9.0, CFG)
+    eng = Engine(base.net, base.routes, schedule, base.plans, CFG)
+    changed = 0
+    for _ in range(600):
+        before = dict(zip(eng.ag.view("vid").tolist(),
+                          zip(eng.ag.view("link").tolist(), eng.ag.view("lat").tolist(),
+                              strict=True), strict=True))
+        eng.step()
+        for vid, link, lat in zip(eng.ag.view("vid").tolist(), eng.ag.view("link").tolist(),
+                                  eng.ag.view("lat").tolist(), strict=True):
+            if vid in before and before[vid][0] == link:
+                step = abs(lat - before[vid][1])
+                changed += step > 0
+                assert step <= CFG.dt / LANE_CHANGE_S + 1e-9
+    assert changed > 0

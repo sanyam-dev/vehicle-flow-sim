@@ -10,6 +10,7 @@ Per step (dt = 0.5 s):
 6. MOBIL      lane changes; leaders/IDM are refreshed for those that moved
 7. integrate  ballistic update, never overlapping the leader
 8. transfer   edge -> movement -> edge hand-over, exits, junction delay
+8b. separate  safety net: no vehicle may overlap the one ahead in its lane
 9. gridlock   vehicles at a standstill for GRIDLOCK_S are removed (as SUMO's
               teleport does) so a local deadlock cannot freeze the network;
               they are counted in the `gridlock_removed` metric
@@ -27,7 +28,7 @@ from app.sim.agents import AgentArrays
 from app.sim.idm import MAX_DECEL, idm_accel
 from app.sim.junctions import admit
 from app.sim.laneindex import LaneIndex
-from app.sim.leaders import leader_gaps
+from app.sim.leaders import junction_queues, leader_gaps, stop_line_distance
 from app.sim.metrics import MetricsCollector
 from app.sim.mobil import lane_changes
 from app.sim.recorder import FrameRecorder
@@ -40,6 +41,10 @@ PARAM_NAMES = ("length", "v0", "a", "b", "T", "s0", "politeness", "threshold", "
 STOPPED_MS = 0.5
 GRIDLOCK_S = 300.0  # continuous standstill longer than any signal cycle
 OVERLAP_EPS_M = 0.05
+LANE_CHANGE_S = 2.0  # seconds a lane change takes on screen
+HARD_BRAKE = 4.0  # deceleration (m/s^2) counted as a hard-braking event
+TURN_BRAKE_SHARE = 0.7  # start slowing for a turn at this share of comfortable braking
+_LANE_BIG = 1e7  # separates lanes when taking a running minimum over all actors
 
 
 @dataclass
@@ -86,6 +91,7 @@ class Engine:
         self.t = 0.0
         self.n_steps = 0
         self.v0_eff = np.zeros(0)
+        self.queue_room = np.zeros(0)
 
     def _index(self) -> LaneIndex:
         """Lane index of all vehicles plus closure obstacles."""
@@ -114,8 +120,30 @@ class Engine:
         turn = nxt >= net.n_edges
         v_turn = np.where(turn, net.link_vmax[np.maximum(nxt, 0)] * factor, np.inf)
         rem = np.maximum(net.link_len[link] - ag.view("pos"), 0.5)
-        brake = np.where(v > v_turn, (v_turn**2 - v**2) / (2 * rem), np.inf)
-        return np.maximum(np.minimum(acc, brake), -MAX_DECEL)
+        need = np.where(v > v_turn, (v**2 - v_turn**2) / (2 * rem), 0.0)
+        # Also stay able to stop at the stop line after the junction ahead.
+        d_stop = np.maximum(stop_line_distance(self, nxt) - P["s0"][vt], 0.5)
+        need = np.maximum(need, v**2 / (2 * d_stop))
+        # Brake for these only once it takes a real deceleration (not from afar).
+        brake = np.where(need >= TURN_BRAKE_SHARE * P["b"][vt], -need, np.inf)
+        acc = np.minimum(np.minimum(acc, brake), self._queue_accel(nxt))
+        return np.maximum(acc, -MAX_DECEL)
+
+    def _queue_accel(self, nxt: np.ndarray) -> np.ndarray:
+        """Acceleration limit from vehicles on other turn paths (merge / diverge).
+
+        Until the shared space starts, the follower brakes comfortably at most,
+        or as hard as needed to stop before the shared space. Also stores the
+        room each vehicle has (`self.queue_room`) for the integration clamp.
+        """
+        ag, P = self.ag, self.params
+        vt, v = ag.view("vtype"), ag.view("speed")
+        q = junction_queues(self, nxt)
+        self.queue_room = np.maximum(q.gap, q.dist)
+        acc = idm_accel(v, self.v0_eff, P["a"][vt], P["b"][vt], P["T"][vt], P["s0"][vt],
+                        q.gap, q.v_lead)
+        floor = -np.maximum(P["b"][vt], v**2 / (2 * np.maximum(q.dist, 0.5)))
+        return np.where(q.dist > 0, np.maximum(acc, floor), acc)
 
     def _integrate(self, acc: np.ndarray, gap: np.ndarray, v_lead: np.ndarray) -> None:
         """Ballistic position/speed update (v >= 0) that never overruns the leader."""
@@ -125,13 +153,19 @@ class Engine:
         stops = v_new < 0
         ds = np.where(stops, -v**2 / (2 * np.minimum(acc, -1e-9)), v * dt + 0.5 * acc * dt**2)
         v_new = np.maximum(v_new, 0.0)
-        room = np.maximum(gap - OVERLAP_EPS_M, 0.0)
+        room = np.maximum(np.minimum(gap, self.queue_room) - OVERLAP_EPS_M, 0.0)
         clamp = ds > room
         ds = np.where(clamp, room, ds)
         v_new = np.where(clamp, np.minimum(v_new, v_lead), v_new)
         ag.view("pos")[:] += ds
+        ag.view("acc")[:] = (v_new - v) / dt
         ag.view("speed")[:] = v_new
-        ag.view("acc")[:] = acc
+        if self.t >= self.cfg.warmup_s:
+            self.metrics.hard_brakes += int((ag.view("acc") < -HARD_BRAKE).sum())
+        # Lane changes are drawn over LANE_CHANGE_S: `lat` eases towards `lane`.
+        lat, on_edge = ag.view("lat"), ag.view("link") < self.net.n_edges
+        step = np.clip(ag.view("lane") - lat, -dt / LANE_CHANGE_S, dt / LANE_CHANGE_S)
+        lat[:] = np.where(on_edge, lat + step, lat)
         still = v_new < STOPPED_MS
         slow = still & (ag.view("link") < self.net.n_edges)
         wait, stuck = ag.view("wait"), ag.view("stuck")
@@ -147,6 +181,7 @@ class Engine:
         delay = (self.t - ag.t_edge[rows]) - free_t
         self.metrics.on_junction(self.t, net.mv_node[nxt[rows] - net.n_edges], delay)
         ag.pos[rows] -= net.link_len[e]
+        ag.lane_in[rows] = ag.lane[rows]
         ag.lane[rows] = net.movement_lane(nxt[rows], ag.lane[rows])
         ag.link[rows] = nxt[rows]
         ag.rptr[rows] += 1
@@ -171,12 +206,40 @@ class Engine:
             go_edge = np.flatnonzero(over & ~on_edge)
             ag.pos[go_edge] -= net.link_len[link[go_edge]]
             ag.link[go_edge], ag.lane[go_edge] = nxt[go_edge], ag.next_lane[go_edge]
+            ag.lat[go_edge] = ag.next_lane[go_edge]
             ag.rptr[go_edge] += 1
             ag.t_edge[go_edge] = self.t
             nxt = self._next_links()
         if exited.any():
             self.metrics.on_exit(self.t, ag.view("t_sched")[exited], ag.view("t_free")[exited])
             ag.remove(exited)
+
+    def _separate(self) -> None:
+        """Safety net: pull back any vehicle that overlaps the actor ahead in its lane.
+
+        For actors sorted by (lane, position) the furthest allowed front of
+        actor i is min over j >= i of (pos_j - S_j) + S_i, with S the running
+        sum of lengths; one reversed running minimum gives all of them.
+        A corrected vehicle also drops to its leader's speed.
+        """
+        ag = self.ag
+        if ag.n < 2:
+            return
+        li = self._index()
+        S = np.cumsum(li.length)
+        lane = np.cumsum(np.concatenate([[0], li.key[1:] != li.key[:-1]])) * _LANE_BIG
+        w = li.pos - S + lane
+        allowed = np.minimum.accumulate(w[::-1])[::-1] - lane + S
+        fix = np.flatnonzero(li.is_veh & (allowed < li.pos - OVERLAP_EPS_M))
+        if len(fix) == 0:
+            return
+        rows = li.agent[fix]
+        ag.pos[rows] = np.maximum(allowed[fix], 0.0)
+        lead = np.minimum(fix + 1, len(li.pos) - 1)
+        ag.speed[rows] = np.minimum(ag.speed[rows], li.speed[lead])
+        if self.t >= self.cfg.warmup_s:
+            self.metrics.overlap_fixes += len(rows)
+            self.metrics.overlaps += int((allowed[fix] < -OVERLAP_EPS_M).sum())
 
     def _clear_gridlock(self) -> None:
         """Remove vehicles that have not moved for GRIDLOCK_S (deadlock breaker)."""
@@ -201,6 +264,7 @@ class Engine:
         self.t += self.cfg.dt
         self.n_steps += 1
         self._transfer(nxt)
+        self._separate()
         self._clear_gridlock()
         if self.n_steps % max(1, round(self.cfg.frame_dt / self.cfg.dt)) == 0:
             self.metrics.sample(self.t, self.ag)

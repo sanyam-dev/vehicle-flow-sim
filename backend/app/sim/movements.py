@@ -4,9 +4,12 @@ A movement is one allowed (in-edge -> out-edge) path through a node. Its
 geometry is a quadratic Bezier from the trimmed end of the in-edge to the
 trimmed start of the out-edge, offset to the driving side. Two movements
 at the same node conflict if their paths cross or they merge into the
-same out-edge. Movements sharing an in-edge never conflict (they queue
-in lanes instead). Grade-separated roads never share a node, so they can
-never produce a conflict here.
+same out-edge. Crossing conflicts are resolved by junction control
+(`junctions.admit`); merges are resolved by car-following in a shared
+queue (`leaders.junction_queues`), so merging traffic zips together.
+Movements sharing an in-edge never conflict (they queue in lanes instead).
+Grade-separated roads never share a node, so they can never produce a
+conflict here.
 """
 
 from dataclasses import dataclass, field
@@ -71,6 +74,12 @@ class Movements:
     conflicts: list[np.ndarray] = field(default_factory=list)
     # conflict_s[a][j]: distance along movement conflicts[a][j] to the conflict point
     conflict_s: list[np.ndarray] = field(default_factory=list)
+    # conflict_own[a][j]: distance along movement a itself to that conflict point
+    conflict_own: list[np.ndarray] = field(default_factory=list)
+    # crossing[a][j]: True where the paths cross, False for a pure merge into one out-edge
+    crossing: list[np.ndarray] = field(default_factory=list)
+    # nodes where two paths cross (not just merge): these need a control
+    crossing_nodes: set[int] = field(default_factory=set)
 
 
 def _turn_class(d_in: np.ndarray, d_out: np.ndarray, driving_side: str) -> int:
@@ -176,16 +185,26 @@ def _node_conflicts(mv: Movements, ids: list[int]) -> None:
     """
     lines = {m: LineString(mv.paths[m]) for m in ids}
     for a in ids:
-        hits, at = [], []
+        hits, at, own, cross = [], [], [], []
         for b in ids:
             if a == b or mv.m_in[a] == mv.m_in[b]:
                 continue
-            s = _conflict_point(lines[a], lines[b], mv.m_out[a] == mv.m_out[b])
-            if s is not None:
-                hits.append(b)
-                at.append(s * mv.length[b] / max(lines[b].length, 1e-9))
+            merge = mv.m_out[a] == mv.m_out[b]
+            s = _conflict_point(lines[a], lines[b], merge)
+            if s is None:
+                continue
+            s_own = _conflict_point(lines[b], lines[a], merge)
+            hits.append(b)
+            at.append(s * mv.length[b] / max(lines[b].length, 1e-9))
+            own.append((s if s_own is None else s_own) * mv.length[a]
+                       / max(lines[a].length, 1e-9))
+            cross.append(not merge)
+            if not merge:
+                mv.crossing_nodes.add(mv.node[a])
         mv.conflicts[a] = np.asarray(hits, dtype=np.int32)
         mv.conflict_s[a] = np.asarray(at, dtype=float)
+        mv.conflict_own[a] = np.asarray(own, dtype=float)
+        mv.crossing[a] = np.asarray(cross, dtype=bool)
 
 
 def build_movements(edges: EdgeShape, node_xy: np.ndarray, boundary: np.ndarray,
@@ -220,5 +239,7 @@ def build_movements(edges: EdgeShape, node_xy: np.ndarray, boundary: np.ndarray,
                 _add_movement(mv, edges, e_in, e_out, node, node_xy[node], side)
         mv.conflicts.extend([np.zeros(0, np.int32)] * (len(mv.m_in) - start))
         mv.conflict_s.extend([np.zeros(0)] * (len(mv.m_in) - start))
+        mv.conflict_own.extend([np.zeros(0)] * (len(mv.m_in) - start))
+        mv.crossing.extend([np.zeros(0, bool)] * (len(mv.m_in) - start))
         _node_conflicts(mv, list(range(start, len(mv.m_in))))
     return mv

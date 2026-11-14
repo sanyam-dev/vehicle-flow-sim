@@ -71,6 +71,10 @@ class Network:
     mv_pref: np.ndarray
     mv_conflicts: list[np.ndarray]
     mv_conflict_s: list[np.ndarray]
+    mv_conflict_own: list[np.ndarray]
+    mv_cross: list[np.ndarray]
+    mv_cross_s: list[np.ndarray]
+    mv_cross_own: list[np.ndarray]
     mv_index: dict[tuple[int, int], int]
     geom: GeomTable
     entries: np.ndarray
@@ -235,7 +239,7 @@ def compile_network(G: nx.MultiDiGraph) -> Network:
     attrs = _edge_attrs(rows, full_pts)
     nbrs = np.asarray([len(set(G.predecessors(n)) | set(G.successors(n))) for n in node_ids])
     boundary = boundary_nodes(G, xy, nbrs)
-    radius = junction_radius(frm, to, attrs["lanes"], nbrs, boundary, len(node_ids))
+    radius = junction_radius(frm, to, attrs["lanes"], nbrs, boundary, len(node_ids), full_pts)
     pts = _trim(full_pts, frm, to, radius)
     clo = closures_of(rows, pts, attrs)
     shape = EdgeShape(frm, to, pts, attrs["lanes"], attrs["vmax"], attrs["two_way"],
@@ -272,7 +276,10 @@ def _assemble(G, node_ids, xy, rows, pts, attrs, mv: Movements, boundary, nbrs, 
         mv_in=np.asarray(mv.m_in, np.int32), mv_out=np.asarray(mv.m_out, np.int32),
         mv_node=np.asarray(mv.node, np.int32), mv_turn=np.asarray(mv.turn, np.int8),
         mv_pref=np.asarray(mv.pref_lane, np.int8), mv_conflicts=mv.conflicts,
-        mv_conflict_s=mv.conflict_s,
+        mv_conflict_s=mv.conflict_s, mv_conflict_own=mv.conflict_own,
+        mv_cross=[c[x] for c, x in zip(mv.conflicts, mv.crossing, strict=True)],
+        mv_cross_s=[c[x] for c, x in zip(mv.conflict_s, mv.crossing, strict=True)],
+        mv_cross_own=[c[x] for c, x in zip(mv.conflict_own, mv.crossing, strict=True)],
         mv_index={(a, b): i for i, (a, b) in enumerate(zip(mv.m_in, mv.m_out, strict=True))},
         geom=GeomTable(pts + mv.paths),
         entries=np.flatnonzero(boundary & has_out), exits=np.flatnonzero(boundary & has_in),

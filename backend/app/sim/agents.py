@@ -28,6 +28,8 @@ FIELDS: dict[str, type] = {
     "wait": np.float64,       # seconds spent waiting at the current stop line
     "stuck": np.float64,      # seconds continuously at standstill (gridlock check)
     "lc_timer": np.float64,   # seconds until the next lane-change decision
+    "lat": np.float64,        # drawn lateral position in lane units (eases towards `lane`)
+    "lane_in": np.int8,       # lane on the in-edge when the current movement was entered
 }
 
 

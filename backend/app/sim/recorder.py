@@ -3,8 +3,11 @@
 Each frame stores, per active vehicle: id, lon/lat (as float32 offsets
 from the area origin, ~1 cm precision), compass heading, type and speed.
 Lane positions are drawn with a lateral offset towards the driving side
-(lane 0 = kerb lane). Frames are grouped into CHUNK_FRAMES-sized `.npz`
-files so the API can serve them piecewise:
+(lane 0 = kerb lane). The offset uses the agent's eased `lat` value, so a
+lane change is a smooth drift, and inside a junction it blends from the
+lane the vehicle came from to the lane it is heading for. Frames are
+grouped into CHUNK_FRAMES-sized `.npz` files so the API can serve them
+piecewise:
 
     <out_dir>/chunk_00000.npz   t (F,), off (F+1,), vid, dlon, dlat, hdg, vtype, speed
     <out_dir>/meta.json         origin, frame_dt, n_chunks, n_frames
@@ -47,14 +50,31 @@ class FrameRecorder:
         if out_dir is not None:
             Path(out_dir).mkdir(parents=True, exist_ok=True)
 
+    def _lateral(self, ag) -> np.ndarray:
+        """Offset (m) of every agent from its link polyline, towards the driving side.
+
+        On a road: carriageway offset + lane offset. On a movement (whose path
+        joins the two carriageway centres): a smooth blend from the offset of
+        the lane it left to the offset of the lane it will take.
+        """
+        net, E = self.net, self.net.n_edges
+        link, lat, pos = ag.view("link"), ag.view("lat"), ag.view("pos")
+        lanes = net.link_lanes.astype(float)
+        out = self.cw_offset[link] + (lanes[link] / 2 - lat - 0.5) * LANE_WIDTH_M
+        on_mv = np.flatnonzero(link >= E)
+        if len(on_mv):
+            m = link[on_mv] - E
+            a = (lanes[net.mv_in[m]] / 2 - lat[on_mv] - 0.5) * LANE_WIDTH_M
+            b = (lanes[net.mv_out[m]] / 2 - ag.view("next_lane")[on_mv] - 0.5) * LANE_WIDTH_M
+            u = np.clip(pos[on_mv] / net.link_len[link[on_mv]], 0.0, 1.0)
+            out[on_mv] = a + (b - a) * (u * u * (3 - 2 * u))
+        return out
+
     def _positions(self, ag) -> tuple[np.ndarray, np.ndarray]:
         """Projected (x, y) with lane offset, and unit directions of all agents."""
         net = self.net
-        link, lane = ag.view("link"), ag.view("lane").astype(float)
-        xy, d = net.geom.locate(link, ag.view("pos"))
-        lanes = net.link_lanes[link].astype(float)
-        lateral = self.cw_offset[link] + (lanes / 2 - lane - 0.5) * LANE_WIDTH_M
-        return xy + side_normal(d, net.driving_side) * lateral[:, None], d
+        xy, d = net.geom.locate(ag.view("link"), ag.view("pos"))
+        return xy + side_normal(d, net.driving_side) * self._lateral(ag)[:, None], d
 
     def capture(self, t: float, ag) -> None:
         """Record one frame of all active vehicles at time t."""

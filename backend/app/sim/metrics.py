@@ -34,6 +34,10 @@ class MetricsCollector:
         jn_delay_sum, jn_delay_cnt: Approach delay sums/counts per node.
         q_sum: (bins, N) summed queue samples per node; q_max: (N,) max queue.
         sp_sum, sp_cnt: (bins, E) speed sums/counts per edge.
+        hard_brakes: Vehicle-steps braking harder than the engine's HARD_BRAKE.
+        overlap_fixes: Corrections made by the engine's separation safety net.
+        overlaps: Vehicles found overlapping their lane leader at a sample
+            (after the safety net; expected 0).
     """
 
     def __init__(self, net, duration_s: float, warmup_s: float):
@@ -48,6 +52,7 @@ class MetricsCollector:
         n_bins = int(np.ceil(duration_s / BIN_S)) + 1
         N, E = len(net.node_xy), net.n_edges
         self.tt, self.tt_free, self.unserved, self.gridlock = [], [], 0, 0
+        self.hard_brakes = self.overlap_fixes = self.overlaps = 0
         self.exits_per_bin = np.zeros(n_bins)
         self.jn_delay_sum, self.jn_delay_cnt = np.zeros(N), np.zeros(N)
         self.q_sum, self.q_samples = np.zeros((n_bins, N)), np.zeros(n_bins)
@@ -124,6 +129,8 @@ class MetricsCollector:
             "mean_speed_kmh": _r(sp * 3.6),
             "unserved_trips": int(self.unserved),
             "gridlock_removed": int(self.gridlock),
+            "hard_brakes": int(self.hard_brakes),
+            "overlaps": int(self.overlaps),
             "in_network_at_end": int(in_network),
             "waiting_at_entries_at_end": int(waiting),
         }

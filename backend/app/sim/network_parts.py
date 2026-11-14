@@ -11,6 +11,9 @@ from pyproj import Transformer
 
 BOUNDARY_BAND_M = 80.0
 SNAP_DIST_M = 40.0
+LANE_WIDTH_M = 3.2
+LEG_CHORD_M = 30.0  # leg directions are measured over this distance from the node
+MAX_RADIUS_M = 25.0
 
 
 def edge_polyline(attrs: dict, xy_u: np.ndarray, xy_v: np.ndarray) -> np.ndarray:
@@ -69,18 +72,65 @@ def boundary_nodes(G: nx.MultiDiGraph, xy: np.ndarray, nbrs: np.ndarray) -> np.n
     return mask if mask.sum() >= 2 else dead_end
 
 
+def _legs(node: int, frm: np.ndarray, to: np.ndarray, pts: list[np.ndarray],
+          lanes: np.ndarray, edges: list[int]) -> list[tuple[np.ndarray, float]]:
+    """Road legs of one node: (unit direction away from the node, half width in m).
+
+    Both directions of a two-way road form one leg (the carriageways lie
+    either side of the shared centre line).
+    """
+    by_other: dict[int, list[int]] = {}
+    for e in edges:
+        by_other.setdefault(int(to[e] if frm[e] == node else frm[e]), []).append(e)
+    legs = []
+    for group in by_other.values():
+        e = group[0]
+        p = pts[e] if frm[e] == node else pts[e][::-1]
+        seg = np.linalg.norm(np.diff(p, axis=0), axis=1)
+        far = p[min(int(np.searchsorted(np.cumsum(seg), LEG_CHORD_M)) + 1, len(p) - 1)]
+        d = far - p[0]
+        two_way = len({(int(frm[g]), int(to[g])) for g in group}) > 1
+        width = max(int(lanes[g]) for g in group) * LANE_WIDTH_M
+        legs.append((d / max(float(np.linalg.norm(d)), 1e-9), width if two_way else width / 2))
+    return legs
+
+
 def junction_radius(frm: np.ndarray, to: np.ndarray, lanes: np.ndarray, nbrs: np.ndarray,
-                    boundary: np.ndarray, n_nodes: int) -> np.ndarray:
+                    boundary: np.ndarray, n_nodes: int,
+                    pts: list[np.ndarray] | None = None) -> np.ndarray:
     """Physical half-size of each junction box in metres.
 
     Edges are trimmed by this radius; turn paths span the trimmed region.
-    Grows with the widest approach. Zero for pass-through and boundary nodes.
+    The radius grows with the widest approach and, when `pts` is given, is
+    large enough that neighbouring legs no longer overlap where they are cut:
+    two legs with half widths a, b meeting at angle t are clear of each other
+    at distance (a + b) / (2 sin(t / 2)). Zero for pass-through and boundary nodes.
+
+    Args:
+        frm, to: (E,) node index per edge.
+        lanes: (E,) lanes per direction.
+        nbrs: (N,) distinct neighbours per node.
+        boundary: (N,) entry/exit node mask.
+        n_nodes: Number of nodes.
+        pts: Untrimmed edge polylines (optional).
     """
     max_lanes = np.zeros(n_nodes)
     np.maximum.at(max_lanes, frm, lanes)
     np.maximum.at(max_lanes, to, lanes)
     r = np.clip(3.0 + 1.6 * max_lanes, 6.0, 14.0)
     r[(nbrs < 3) | boundary] = 0.0
+    if pts is None:
+        return r
+    at_node: dict[int, list[int]] = {}
+    for e in range(len(frm)):
+        at_node.setdefault(int(frm[e]), []).append(e)
+        at_node.setdefault(int(to[e]), []).append(e)
+    for node in np.flatnonzero(r > 0):
+        legs = _legs(int(node), frm, to, pts, lanes, at_node[int(node)])
+        for i, (d1, w1) in enumerate(legs):
+            for d2, w2 in legs[i + 1:]:
+                half = np.sqrt(max((1.0 - float(np.dot(d1, d2))) / 2.0, 1e-4))  # sin(t/2)
+                r[node] = max(r[node], min((w1 + w2) / (2.0 * half), MAX_RADIUS_M))
     return r
 
 

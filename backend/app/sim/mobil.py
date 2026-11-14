@@ -3,7 +3,7 @@
 A vehicle i considers moving one lane left or right. With new follower n
 and old follower o, it changes when
 
-    safety:    a_n(after) >= -b_safe
+    safety:    a_n(after) >= -b_safe  and  a_i(after) >= -b_safe
     incentive: a_i(after) - a_i(now) + p [ (a_n(after) - a_n(now))
                                          + (a_o(after) - a_o(now)) ] > threshold - bias
 
@@ -27,7 +27,7 @@ CLOSURE_LOOKAHEAD_M = 150.0
 CLOSURE_BIAS = 3.0
 TURN_BIAS_FAR, TURN_BIAS_NEAR, TURN_BIAS_RANGE_M = 0.3, 2.5, 150.0
 KERB_BIAS = 0.1
-MIN_SIDE_GAP_M = 0.5
+MIN_SIDE_GAP_M = 1.0
 # No lane changes this close to the start of an edge: vehicles still
 # leaving the junction behind could not see the cut-in.
 NO_LC_ZONE_M = 15.0
@@ -86,7 +86,8 @@ def _evaluate(eng, li: LaneIndex, rows: np.ndarray, tgt: np.ndarray, nxt: np.nda
     stop_gap = np.where(nxt[rows] >= 0, net.link_len[ag.link[rows]] - pos, np.inf)
     g_new = np.where(lead >= 0, li.pos[lead] - li.length[lead] - pos, stop_gap)
     vl_new = np.where(lead >= 0, li.speed[lead], 0.0)
-    a_self = _idm_for(eng, rows, v, g_new, vl_new) - acc[rows]
+    a_abs = _idm_for(eng, rows, v, g_new, vl_new)
+    a_self = a_abs - acc[rows]
     # New follower (vehicles only; obstacles never move).
     f_veh = (foll >= 0) & li.is_veh[np.maximum(foll, 0)]
     fa = li.agent[np.maximum(foll, 0)]
@@ -103,6 +104,8 @@ def _evaluate(eng, li: LaneIndex, rows: np.ndarray, tgt: np.ndarray, nxt: np.nda
     score = (a_self + P["politeness"][vt] * (d_new + d_old) - P["threshold"][vt]
              + _bias(eng, rows, tgt, nxt))
     safe = (g_new > MIN_SIDE_GAP_M) & (g_f > MIN_SIDE_GAP_M) & (a_f_after >= -P["b_safe"][vt])
+    # The changer itself must not have to brake hard behind its new leader.
+    safe &= (lead < 0) | (a_abs >= -P["b_safe"][vt])
     safe &= ~net.lane_blocked(ag.link[rows], tgt, pos - length, pos)
     return np.where(safe, score, -np.inf)
 
@@ -136,7 +139,8 @@ def lane_changes(eng, li: LaneIndex, nxt: np.ndarray, gap: np.ndarray,
     """Decide and apply lane changes for vehicles due to re-evaluate.
 
     Only vehicles on multi-lane road edges, not yet granted junction entry,
-    are considered. Changes are instantaneous; the recorder smooths them.
+    are considered. The lane index changes at once; the agent's `lat` value
+    (see engine._integrate) eases over, so the recorder draws a smooth drift.
 
     Args:
         eng: Engine (ag, net, params, rng, cfg.dt).
@@ -150,7 +154,8 @@ def lane_changes(eng, li: LaneIndex, nxt: np.ndarray, gap: np.ndarray,
     timer -= eng.cfg.dt
     link = ag.view("link")
     due = (timer <= 0) & (link < net.n_edges) & ~ag.view("granted")
-    due &= (net.link_lanes[link] > 1) & (ag.view("pos") > NO_LC_ZONE_M)
+    rear = ag.view("pos") - P["length"][ag.view("vtype")]
+    due &= (net.link_lanes[link] > 1) & (rear > NO_LC_ZONE_M)
     rows = np.flatnonzero(due)
     if len(rows) == 0:
         return rows

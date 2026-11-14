@@ -8,7 +8,7 @@ where s is the bumper-to-bumper gap and dv = v - v_leader.
 
 import numpy as np
 
-MAX_DECEL = 9.0  # physical braking limit (m/s^2)
+MAX_DECEL = 6.0  # emergency braking limit (m/s^2)
 MIN_GAP = 0.1    # avoid division by zero when bumpers touch
 
 

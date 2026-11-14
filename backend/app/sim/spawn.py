@@ -103,7 +103,10 @@ class Spawner:
             if v_eq < INSERT_SPEED_RATIO * min(v_tail, v_des):
                 continue
             q.popleft()
-            v_in = min(v_des, v_eq)
+            # ... and slow enough to stop comfortably before the first stop line.
+            run = eng.net.link_len[edge] - P["length"][vt] - P["s0"][vt]
+            v_stop = np.sqrt(2.0 * P["b"][vt] * max(run, 0.0)) if rt.length[r] > 1 else np.inf
+            v_in = min(v_des, v_eq, v_stop)
             for k, val in zip(cols, (vid, vt, edge, lane, v_in, v0, s.speed_factor[vid], r,
                                      s.t[vid], rt.free_time[r], t), strict=True):
                 cols[k].append(val)
@@ -112,5 +115,6 @@ class Spawner:
             arr = {k: np.asarray(v) for k, v in cols.items()}
             # Front bumper one vehicle length in, so the rear sits on the entry node.
             pos = np.minimum(P["length"][arr["vtype"]], 0.5 * eng.net.link_len[arr["link"]])
-            eng.ag.add(**arr, pos=pos, lc_timer=eng.rng.uniform(0, 2.0, n))
+            eng.ag.add(**arr, pos=pos, lat=arr["lane"].astype(float),
+                       lc_timer=eng.rng.uniform(0, 2.0, n))
         return len(cols["vid"])

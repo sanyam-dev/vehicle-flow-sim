@@ -2,7 +2,8 @@
 
 A movement is one allowed (in-edge -> out-edge) path through a node. Its
 geometry is a quadratic Bezier from the trimmed end of the in-edge to the
-trimmed start of the out-edge, offset to the driving side. Two movements
+trimmed start of the out-edge, offset to the driving side (at a roundabout:
+an arc around the island instead). Two movements
 at the same node conflict if their paths cross or they merge into the
 same out-edge. Crossing conflicts are resolved by junction control
 (`junctions.admit`); merges are resolved by car-following in a shared
@@ -34,6 +35,10 @@ STRAIGHT_MAX_DEG, UTURN_MIN_DEG = 45.0, 160.0
 TURN_SPEED_MS = {NEAR_TURN: 5.0, FAR_TURN: 7.0, UTURN: 3.0}
 ANY_LANE, LAST_LANE = -1, -2
 MAX_TURN_LANES = 2
+ROUNDABOUT_SPEED_MS = 20.0 / 3.6
+RING_SHARE = 0.55  # ring radius as a share of the junction radius
+RING_STEP_RAD = 0.26  # arc sampling (about 15 degrees)
+RING_JOIN_RAD = 0.35  # entries / exits meet the ring this far round, so they join at a slant
 
 
 @dataclass
@@ -139,10 +144,49 @@ def _path(edges: EdgeShape, e_in: int, e_out: int, node_xy: np.ndarray,
     return bezier(p0, ctrl, p1)
 
 
+def _circle_path(edges: EdgeShape, e_in: int, e_out: int, centre: np.ndarray,
+                 radius: float, side: str) -> np.ndarray:
+    """Turn path around a roundabout island.
+
+    The vehicle joins the ring, circulates in the driving direction
+    (clockwise for left-hand traffic) and leaves at its exit.
+
+    Args:
+        edges: Edge shapes.
+        e_in, e_out: In- and out-edge.
+        centre: Junction node coordinates.
+        radius: Junction radius (m); the ring is RING_SHARE of it.
+        side: Driving side.
+    Returns:
+        (K, 2) polyline from the in-edge end to the out-edge start.
+    """
+    d_in, d_out = _headings(edges, e_in, e_out)
+    p0 = edges.pts[e_in][-1] + side_normal(d_in, side) * _carriageway_offset(edges, e_in)
+    p1 = edges.pts[e_out][0] + side_normal(d_out, side) * _carriageway_offset(edges, e_out)
+    sgn = -1.0 if side == "left" else 1.0
+    a0 = np.arctan2(*(p0 - centre)[::-1])
+    a1 = np.arctan2(*(p1 - centre)[::-1])
+    sweep = float((sgn * (a1 - a0)) % (2 * np.pi))
+    join = min(RING_JOIN_RAD, sweep / 3)
+    n = max(2, int(np.ceil((sweep - 2 * join) / RING_STEP_RAD)) + 1)
+    ang = a0 + sgn * np.linspace(join, sweep - join, n)
+    ring = centre + RING_SHARE * radius * np.stack([np.cos(ang), np.sin(ang)], axis=1)
+    return np.vstack([p0, ring, p1])
+
+
 def _add_movement(mv: Movements, edges: EdgeShape, e_in: int, e_out: int,
-                  node: int, node_xy: np.ndarray, side: str) -> None:
-    """Append one movement (geometry, turn class, speed, preferred lane)."""
-    path = _path(edges, e_in, e_out, node_xy, side)
+                  node: int, node_xy: np.ndarray, side: str, circle_r: float = 0.0) -> None:
+    """Append one movement (geometry, turn class, speed, preferred lane).
+
+    Args:
+        mv: Movements under construction.
+        edges: Edge shapes.
+        e_in, e_out: In- and out-edge.
+        node: Node index.
+        node_xy: Node coordinates.
+        side: Driving side.
+        circle_r: Junction radius if the node is a roundabout, else 0.
+    """
     turn = _turn_class(*_approach_headings(edges, e_in, e_out, node_xy), side)
     if edges.to[e_out] == edges.frm[e_in]:
         turn = UTURN  # leads straight back to where the vehicle came from
@@ -150,6 +194,11 @@ def _add_movement(mv: Movements, edges: EdgeShape, e_in: int, e_out: int,
     pref = {STRAIGHT: ANY_LANE, NEAR_TURN: 0}.get(turn, LAST_LANE)
     width = int(min(edges.lanes[e_in], edges.lanes[e_out]))
     lanes = {STRAIGHT: width, UTURN: 1}.get(turn, min(width, MAX_TURN_LANES))
+    if circle_r > 0:  # one circulating lane, everybody slow
+        path = _circle_path(edges, e_in, e_out, node_xy, circle_r, side)
+        vmax, lanes = min(edges.vmax[e_in], edges.vmax[e_out], ROUNDABOUT_SPEED_MS), 1
+    else:
+        path = _path(edges, e_in, e_out, node_xy, side)
     mv.m_in.append(e_in)
     mv.m_out.append(e_out)
     mv.node.append(node)
@@ -208,7 +257,7 @@ def _node_conflicts(mv: Movements, ids: list[int]) -> None:
 
 
 def build_movements(edges: EdgeShape, node_xy: np.ndarray, boundary: np.ndarray,
-                    side: str) -> Movements:
+                    side: str, circle_radius: np.ndarray | None = None) -> Movements:
     """Create every movement and the per-node conflict matrix.
 
     U-turns are only allowed at nodes where no other exit exists.
@@ -219,6 +268,7 @@ def build_movements(edges: EdgeShape, node_xy: np.ndarray, boundary: np.ndarray,
         node_xy: (N, 2) node coordinates.
         boundary: (N,) bool, True for entry/exit nodes.
         side: Driving side, "left" or "right".
+        circle_radius: (N,) junction radius of roundabout nodes, 0 elsewhere.
     Returns:
         Movements with conflicts filled.
     """
@@ -236,7 +286,8 @@ def build_movements(edges: EdgeShape, node_xy: np.ndarray, boundary: np.ndarray,
         for e_in in ins:
             non_u = [o for o in outs if edges.to[o] != edges.frm[e_in]]
             for e_out in (non_u or outs):
-                _add_movement(mv, edges, e_in, e_out, node, node_xy[node], side)
+                _add_movement(mv, edges, e_in, e_out, node, node_xy[node], side,
+                              0.0 if circle_radius is None else float(circle_radius[node]))
         mv.conflicts.extend([np.zeros(0, np.int32)] * (len(mv.m_in) - start))
         mv.conflict_s.extend([np.zeros(0)] * (len(mv.m_in) - start))
         mv.conflict_own.extend([np.zeros(0)] * (len(mv.m_in) - start))

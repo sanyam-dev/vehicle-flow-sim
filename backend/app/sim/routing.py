@@ -16,9 +16,9 @@ from dataclasses import dataclass
 import networkx as nx
 import numpy as np
 
-from app.sim.network import PRIORITY, SIGNAL, Network
+from app.sim.network import PRIORITY, ROUNDABOUT, SIGNAL, Network
 
-NODE_PENALTY_S = {SIGNAL: 20.0, PRIORITY: 4.0}
+NODE_PENALTY_S = {SIGNAL: 20.0, PRIORITY: 4.0, ROUNDABOUT: 8.0}
 # Perceived cost per road class: through traffic prefers main roads and only
 # rat-runs through minor streets when they save a lot of time.
 CLASS_COST = {"motorway": 1.0, "trunk": 1.0, "primary": 1.0, "secondary": 1.1,
@@ -55,6 +55,7 @@ def _junction_share(net: Network) -> np.ndarray:
     kind = net.node_kind[to]
     share = np.ones(E)
     share[kind == SIGNAL] = SIGNAL_SHARE
+    share[kind == ROUNDABOUT] = PRIORITY_MINOR_SHARE
     prio = kind == PRIORITY
     share[prio] = np.where(rank[prio] < best[to[prio]], PRIORITY_MINOR_SHARE,
                            PRIORITY_MAJOR_SHARE)

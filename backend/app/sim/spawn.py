@@ -115,6 +115,7 @@ class Spawner:
             arr = {k: np.asarray(v) for k, v in cols.items()}
             # Front bumper one vehicle length in, so the rear sits on the entry node.
             pos = np.minimum(P["length"][arr["vtype"]], 0.5 * eng.net.link_len[arr["link"]])
+            eng.metrics.on_edge_enter(arr["link"])
             eng.ag.add(**arr, pos=pos, lat=arr["lane"].astype(float),
                        lc_timer=eng.rng.uniform(0, 2.0, n))
         return len(cols["vid"])

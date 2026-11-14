@@ -7,7 +7,8 @@ of a vehicle is whichever comes first:
   behaves like a stopped zero-length vehicle);
 * the stop line at the end of a road edge, if the vehicle has a next
   movement, is within its approach horizon and has not been granted entry
-  (a virtual stopped leader);
+  (a virtual stopped leader); at a red or late-amber signal this holds for
+  every vehicle on the approach, so followers do not run the light;
 * when granted / already inside a junction: the last vehicle on the
   movement, then the last vehicle in the chosen lane of the out-edge;
 * inside a junction, vehicles on *other* turn paths that share road space:
@@ -25,10 +26,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from app.sim.junctions import approach_horizon
+from app.sim.junctions import approach_horizon, must_stop_at_signal
 from app.sim.laneindex import LaneIndex, lane_key
-
-DIVERGE_SHARED_M = 8.0  # turn paths from one lane overlap for about this long
 
 
 def _look_into(li: LaneIndex, rows: np.ndarray, link: np.ndarray, lane: np.ndarray,
@@ -119,12 +118,13 @@ def junction_queues(eng, nxt: np.ndarray) -> QueueGaps:
     length, speed = P["length"][ag.vtype[rows]], ag.speed[rows]
     rem = net.link_len[lk] - pos[rows]
     to_out = np.where(on_mv[rows], rem, rem + net.link_len[mv])
-    key = lane_key(net.mv_out[mv - E], ag.next_lane[rows])
+    ring = net.mv_ring[mv - E]  # a roundabout ring is one lane: everybody queues in it
+    key = lane_key(net.mv_out[mv - E], np.where(ring, 0, ag.next_lane[rows]))
     _queue_gaps(rows, key, -to_out, length, speed, ag.vid[rows], to_out, q)
     # Diverge: same in-edge lane, until the rear of the one ahead leaves the shared part.
     x = np.where(on_mv[rows], pos[rows], -rem)
-    lane_in = np.where(on_mv[rows], ag.lane_in[rows], ag.lane[rows])
-    sel = np.flatnonzero(x - length < DIVERGE_SHARED_M)
+    lane_in = np.where(ring, 0, np.where(on_mv[rows], ag.lane_in[rows], ag.lane[rows]))
+    sel = np.flatnonzero(x - length < net.mv_shared[mv - E])
     key = lane_key(net.mv_in[mv[sel] - E], lane_in[sel])
     _queue_gaps(rows[sel], key, x[sel], length[sel], speed[sel], ag.vid[rows[sel]],
                 np.zeros(len(sel)), q)
@@ -191,6 +191,9 @@ def leader_gaps(eng, li: LaneIndex, nxt: np.ndarray) -> tuple[np.ndarray, np.nda
     # approach horizon the vehicle has not asked yet and drives freely.
     stop = free & on_edge & ~granted & (rem < approach_horizon(eng))
     gap[stop] = rem[stop]
+    # Signal telling the whole approach to stop, not only the first vehicle.
+    red = must_stop_at_signal(eng, nxt) & ~granted & (rem < gap)
+    gap[red], v_lead[red] = rem[red], 0.0
     # Granted on an edge: look into the movement, then into the out-edge lane.
     rows = np.flatnonzero(free & on_edge & granted)
     if len(rows):

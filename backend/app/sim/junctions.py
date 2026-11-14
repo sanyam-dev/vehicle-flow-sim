@@ -3,8 +3,8 @@
 Every step, the front vehicle of each lane that is close to its stop line
 asks to enter its next movement. A request is granted when all hold:
 
-1. Signal: the movement shows GREEN (or AMBER and the vehicle can no
-   longer stop comfortably). Unsignalised movements are always GREEN.
+1. Signal: the movement shows GREEN, or AMBER and the vehicle will be over
+   the stop line before the amber ends. Unsignalised movements are always GREEN.
 2. Conflicts: no vehicle on a crossing movement still has to clear the
    conflict point (where the paths cross), and no
    vehicle granted onto a conflicting movement arrives before the requester
@@ -18,7 +18,8 @@ Movements that merge into the same out-edge are not exclusive: merging
 vehicles follow each other in one queue (see `leaders.junction_queues`).
 
 The grant fixes the lane the vehicle takes on the out-edge (`next_lane`).
-At signals, grants are revoked on AMBER/RED if the vehicle can still stop.
+At signals, grants are revoked on RED, and on AMBER unless the vehicle
+makes it over the line in time (`must_stop_at_signal`).
 Every grant is re-checked each step: if a conflicting movement is still
 occupied when the vehicle is about to arrive, the grant is withdrawn while
 the vehicle can still brake (`_revalidate_grants`).
@@ -28,7 +29,7 @@ import numpy as np
 
 from app.sim.laneindex import MAX_KEY_LANES, LaneIndex, lane_key
 from app.sim.movements import ANY_LANE, LAST_LANE
-from app.sim.signals import AMBER, GREEN, RED
+from app.sim.signals import AMBER, RED
 
 STARVATION_S = 15.0
 CLAIM_ETA_S = 4.0
@@ -118,18 +119,34 @@ def _candidates(eng, li: LaneIndex, nxt: np.ndarray) -> np.ndarray:
     return rows[order]
 
 
-def _revoke_on_red(eng, sig: np.ndarray, nxt: np.ndarray) -> None:
-    """Withdraw signal grants that are now AMBER/RED if the vehicle can still stop."""
-    ag, net, P = eng.ag, eng.net, eng.params
-    g = np.flatnonzero(ag.view("granted") & (ag.view("link") < net.n_edges))
-    if len(g) == 0:
-        return
-    m = nxt[g] - net.n_edges
-    v = ag.speed[g]
-    rem = net.link_len[ag.link[g]] - ag.pos[g]
-    can_stop = rem > v**2 / (2 * P["b"][ag.vtype[g]]) + 2.0
-    revoke = (sig[m] != GREEN) & can_stop
-    ag.granted[g[revoke]] = False
+def must_stop_at_signal(eng, nxt: np.ndarray) -> np.ndarray:
+    """(n,) bool: vehicles on a road whose signal tells them to stop at the line.
+
+    RED: always. AMBER: unless the vehicle will be over the line before the
+    amber ends (at the mean of its speed and its turn speed), so nobody is
+    asked to brake hard and nobody enters on red. Applies to every vehicle on
+    the approach, not only the first in each lane.
+
+    Args:
+        eng: Engine (uses ag, net, sig, amber_left, cfg.dt).
+        nxt: (n,) next link per agent.
+    """
+    ag, net = eng.ag, eng.net
+    link, v = ag.view("link"), ag.view("speed")
+    to_mv = (link < net.n_edges) & (nxt >= net.n_edges)
+    m = np.where(to_mv, nxt - net.n_edges, 0)
+    if net.n_movements == 0:
+        return np.zeros(ag.n, dtype=bool)
+    rem = net.link_len[link] - ag.view("pos")
+    v_turn = net.link_vmax[np.where(to_mv, nxt, 0)] * ag.view("speed_factor")
+    eta = rem / np.maximum(0.5 * (v + np.minimum(v, v_turn)), 0.5)
+    late = eta > eng.amber_left[m] - eng.cfg.dt
+    return to_mv & ((eng.sig[m] == RED) | ((eng.sig[m] == AMBER) & late))
+
+
+def _revoke_on_red(eng, stop: np.ndarray) -> None:
+    """Withdraw the grants of vehicles that must stop at their signal."""
+    eng.ag.view("granted")[stop] = False
 
 
 def _occupancy(eng, nxt: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -216,17 +233,17 @@ def _conflict_blocked(eng, i: int, m: int, rem: float, rear_min: np.ndarray,
     return bool((eta_min[conf] < np.maximum(clear_t, P["critical_gap"][vt])).any())
 
 
-def admit(eng, li: LaneIndex, nxt: np.ndarray, sig: np.ndarray) -> None:
+def admit(eng, li: LaneIndex, nxt: np.ndarray) -> None:
     """Grant junction entry for this step (see module docstring).
 
     Args:
         eng: Engine (uses ag, net, params, routes).
         li: Lane index for this step.
         nxt: (n,) next link of each agent, -1 at the end of its route.
-        sig: (M,) signal state per movement.
     """
     ag, net, P = eng.ag, eng.net, eng.params
-    _revoke_on_red(eng, sig, nxt)
+    stop = must_stop_at_signal(eng, nxt)
+    _revoke_on_red(eng, stop)
     rear_min, eta_min, exit_t, reserved = _occupancy(eng, nxt)
     _revalidate_grants(eng, nxt, rear_min, exit_t)
     rear_min, eta_min, exit_t, reserved = _occupancy(eng, nxt)
@@ -237,7 +254,7 @@ def admit(eng, li: LaneIndex, nxt: np.ndarray, sig: np.ndarray) -> None:
         rem = net.link_len[ag.link[i]] - ag.pos[i]
         # Permissive minor approaches at signals yield like a priority arm.
         signalised = eng.plans.mv_ctrl[m] >= 0
-        if sig[m] == RED or (sig[m] == AMBER and rem > v**2 / (2 * P["b"][vt])):
+        if stop[i]:
             continue
         blocked = _conflict_blocked(eng, i, m, rem, rear_min, eta_min)
         if not signalised:

@@ -1,9 +1,10 @@
 """Run a baseline and (optionally) a scenario with identical demand, then compare.
 
-Both runs share the spawn schedule and the signal timings (derived from
-baseline flows). The scenario's routes reuse the baseline route cache and
-only recompute the entry->exit pairs whose path uses a newly closed edge;
-if roads were added, every route is recomputed since any could improve.
+Both runs share the spawn schedule and the signal stop duration. The
+scenario's routes reuse the baseline route cache and only recompute the
+entry->exit pairs whose path uses a newly closed edge; if roads or lanes
+were added, or a junction's control changed, the routes are assigned again
+on the scenario network since any of them could change.
 """
 
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ from app.sim.engine import Engine, SimConfig
 from app.sim.metrics import compare
 from app.sim.network import Network, compile_network
 from app.sim.routing import RouteCache, RouteTable, build_route_table
-from app.sim.signals import SignalPlans, build_signal_plans
+from app.sim.signals import SignalPlans, build_signal_plans, plans_json
 
 
 @dataclass
@@ -50,24 +51,36 @@ def prepare_baseline(G: nx.MultiDiGraph, level: str | None, hour: float,
     cache = RouteCache(net, od)
     routes = build_route_table(net, cache)
     flow = cache.edge_flow(net, od)  # expected veh/s per edge, times the signals
-    return Prepared(net, cache, routes, build_signal_plans(net, flow)), schedule, flow
+    plans = build_signal_plans(net, flow, cfg.signal_stop_s)
+    return Prepared(net, cache, routes, plans), schedule, flow
 
 
-def prepare_scenario(G: nx.MultiDiGraph, base: Prepared, flow: np.ndarray) -> Prepared:
-    """Compile the modified graph and re-route only what changed."""
-    net = compile_network(G)
+def prepare_scenario(G: nx.MultiDiGraph, base: Prepared, flow: np.ndarray,
+                     cfg: SimConfig, od: dict | None = None) -> Prepared:
+    """Compile the modified graph and re-route only what changed.
+
+    Args:
+        G: Scenario graph (the baseline graph plus edits).
+        base: Prepared baseline.
+        flow: (E,) expected baseline edge flow (veh/s).
+        cfg: Run settings (signal stop duration).
+        od: (origin, dest) -> demand (veh/s), for a fresh assignment when
+            the scenario adds capacity.
+    """
+    net = compile_network(G, base.net)
     E0 = base.net.n_edges
-    if net.n_edges > E0:
-        # New roads: any route could improve. Keep the baseline congestion so
-        # drivers still avoid roads that were crowded; new edges start free.
-        factor = base.cache.factor
-        if factor is not None:
-            factor = np.pad(factor, (0, net.n_edges - E0), constant_values=1.0)
-        cache = RouteCache(net, factor=factor)
+    widened = (net.link_lanes[:E0] != base.net.link_lanes[:E0]).any()
+    rebuilt = (net.node_kind != base.net.node_kind).any()
+    if net.n_edges > E0 or widened or rebuilt:
+        # New roads, extra lanes or another junction control: any route could
+        # change, so assign again on the scenario network.
+        cache = RouteCache(net, od)
+        cache.recomputed = len(cache.paths)
     else:
         newly_closed = set(np.flatnonzero(net.edge_closed[:E0] & ~base.net.edge_closed).tolist())
         cache = base.cache.with_closures(net, newly_closed) if newly_closed else base.cache
-    return Prepared(net, cache, build_route_table(net, cache), build_signal_plans(net, flow))
+    plans = build_signal_plans(net, flow, cfg.signal_stop_s)
+    return Prepared(net, cache, build_route_table(net, cache), plans)
 
 
 def run_pair(G_base: nx.MultiDiGraph, G_scen: nx.MultiDiGraph | None, level: str | None,
@@ -83,19 +96,21 @@ def run_pair(G_base: nx.MultiDiGraph, G_scen: nx.MultiDiGraph | None, level: str
         out_dir: Frames go to <out_dir>/baseline and <out_dir>/scenario.
     Returns:
         {"baseline": summary, "scenario": summary | None, "comparison": dict | None,
-         "info": {...}}.
+         "signals": {"baseline": [...], "scenario": [...] | None}, "info": {...}}.
     """
     base, schedule, flow = prepare_baseline(G_base, level, hour, cfg)
     sub = (lambda name: Path(out_dir) / name) if out_dir else (lambda name: None)
     result = {"baseline": Engine(base.net, base.routes, schedule, base.plans, cfg,
                                  sub("baseline")).run(),
               "scenario": None, "comparison": None,
+              "signals": {"baseline": plans_json(base.net, base.plans), "scenario": None},
               "info": {"vehicles_scheduled": len(schedule), "nodes": len(base.net.node_xy),
                        "edges": base.net.n_edges, "signals": len(base.plans.nodes)}}
     if G_scen is not None:
-        scen = prepare_scenario(G_scen, base, flow)
+        scen = prepare_scenario(G_scen, base, flow, cfg, od_rates(schedule, cfg.duration_s))
         result["scenario"] = Engine(scen.net, scen.routes, schedule, scen.plans, cfg,
                                     sub("scenario")).run()
         result["comparison"] = compare(result["baseline"], result["scenario"])
+        result["signals"]["scenario"] = plans_json(scen.net, scen.plans)
         result["info"]["routes_recomputed"] = getattr(scen.cache, "recomputed", 0)
     return result

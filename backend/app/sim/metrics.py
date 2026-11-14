@@ -15,13 +15,15 @@ Collected during a run (everything before `warmup_s` is ignored):
 
 import numpy as np
 
-from app.sim.network import PRIORITY, SIGNAL
+from app.sim.network import JUNCTION_KINDS, ROUNDABOUT, SIGNAL
 
 QUEUE_SPEED_MS = 2.0
 QUEUE_RANGE_M = 100.0
 TT_BIN_S = 30.0
 TT_MAX_S = 1200.0
 BIN_S = 60.0
+MAX_LANES = 8
+CONTROL_NAMES = {SIGNAL: "signal", ROUNDABOUT: "circle"}
 
 
 class MetricsCollector:
@@ -58,7 +60,10 @@ class MetricsCollector:
         self.q_sum, self.q_samples = np.zeros((n_bins, N)), np.zeros(n_bins)
         self.q_max = np.zeros(N)
         self.sp_sum, self.sp_cnt = np.zeros((n_bins, E)), np.zeros((n_bins, E))
-        self.junctions = np.flatnonzero(np.isin(net.node_kind, (PRIORITY, SIGNAL)))
+        self.junctions = np.flatnonzero(np.isin(net.node_kind, JUNCTION_KINDS))
+        self.edge_entries = np.zeros(E, np.int64)
+        self.lane_seconds = np.zeros((E, MAX_LANES), np.int64)
+        self.closed_lane_seconds = self.red_entries = 0
 
     def _bin(self, t: float) -> int:
         return int(t // BIN_S)
@@ -80,8 +85,22 @@ class MetricsCollector:
         self.tt.extend((t - t_sched[keep]).tolist())
         self.tt_free.extend(t_free[keep].tolist())
 
-    def on_junction(self, t: float, nodes: np.ndarray, delays: np.ndarray) -> None:
-        """Vehicles entered junction movements; `delays` are approach delays (s)."""
+    def on_edge_enter(self, edges: np.ndarray) -> None:
+        """Vehicles entered these road edges (spawned there or arrived from a junction)."""
+        np.add.at(self.edge_entries, edges, 1)
+
+    def on_junction(self, t: float, nodes: np.ndarray, delays: np.ndarray,
+                    on_red: np.ndarray | None = None) -> None:
+        """Vehicles entered junction movements.
+
+        Args:
+            t: Simulation time (s).
+            nodes: Junction node per vehicle.
+            delays: Approach delays (s).
+            on_red: True where the vehicle's signal showed red as it entered.
+        """
+        if on_red is not None:
+            self.red_entries += int(on_red.sum())
         if t < self.warmup_s or len(nodes) == 0:
             return
         np.add.at(self.jn_delay_sum, nodes, np.maximum(delays, 0.0))
@@ -103,6 +122,15 @@ class MetricsCollector:
         self.q_sum[b] += q
         self.q_samples[b] += 1
         self.q_max = np.maximum(self.q_max, q)
+
+    def sample_usage(self, ag) -> None:
+        """Once-per-second count of who is where (from t = 0, for the edit checks)."""
+        net = self.net
+        link, lane, pos = ag.view("link"), ag.view("lane"), ag.view("pos")
+        on_edge = link < net.n_edges
+        np.add.at(self.lane_seconds, (link[on_edge], lane[on_edge]), 1)
+        rear = pos - 2.0  # at least this much of the vehicle counts as "inside"
+        self.closed_lane_seconds += int(net.lane_blocked(link, lane, rear, rear).sum())
 
     def _bins_after_warmup(self) -> np.ndarray:
         """Indices of whole minute bins after the warm-up."""
@@ -145,6 +173,7 @@ class MetricsCollector:
             rows.append({
                 "node": int(n), "label": self.net.node_label[n],
                 "signalised": bool(self.net.node_kind[n] == SIGNAL),
+                "control": CONTROL_NAMES.get(int(self.net.node_kind[n]), "priority"),
                 "delay_mean_s": _r(self.jn_delay_sum[n] / cnt) if cnt else None,
                 "vehicles": int(cnt),
                 "queue_mean_veh": _r(q_mean[n]), "queue_max_veh": int(self.q_max[n]),
@@ -179,7 +208,17 @@ class MetricsCollector:
             "speed_heatmap": {"minute": bins.tolist(),
                               "kmh": [[None if not np.isfinite(x) else round(float(x), 1)
                                        for x in row] for row in heat]},
+            "usage": self._usage(),
         }
+
+    def _usage(self) -> dict:
+        """Counts that show whether vehicles honoured the scenario edits."""
+        lanes = self.net.link_lanes[:self.net.n_edges]
+        return {"edge_entries": self.edge_entries.tolist(),
+                "lane_seconds": [row[:n].tolist() for row, n in
+                                 zip(self.lane_seconds, lanes, strict=True)],
+                "closed_lane_seconds": int(self.closed_lane_seconds),
+                "red_entries": int(self.red_entries)}
 
 
 def _r(x: float, nd: int = 2) -> float:

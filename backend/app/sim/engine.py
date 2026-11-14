@@ -32,7 +32,7 @@ from app.sim.leaders import junction_queues, leader_gaps, stop_line_distance
 from app.sim.metrics import MetricsCollector
 from app.sim.mobil import lane_changes
 from app.sim.recorder import FrameRecorder
-from app.sim.signals import movement_states
+from app.sim.signals import RED, movement_states
 from app.sim.spawn import Spawner
 from app.sim.vehicles import param_array
 
@@ -57,6 +57,7 @@ class SimConfig:
         dt: Time step (s).
         frame_dt: Seconds between recorded frames / metric samples.
         seed: Random seed (lane-change jitter; demand has its own seed use).
+        signal_stop_s: Red time per approach at traffic signals (s).
     """
 
     duration_s: float = 1800.0
@@ -64,6 +65,7 @@ class SimConfig:
     dt: float = 0.5
     frame_dt: float = 1.0
     seed: int = 42
+    signal_stop_s: float = 45.0
 
 
 class Engine:
@@ -92,6 +94,8 @@ class Engine:
         self.n_steps = 0
         self.v0_eff = np.zeros(0)
         self.queue_room = np.zeros(0)
+        self.sig = np.zeros(net.n_movements, np.int8)
+        self.amber_left = np.zeros(net.n_movements)
 
     def _index(self) -> LaneIndex:
         """Lane index of all vehicles plus closure obstacles."""
@@ -179,7 +183,8 @@ class Engine:
         free_t = net.link_len[e] / np.minimum(net.link_vmax[e] * ag.speed_factor[rows],
                                               ag.v0[rows])
         delay = (self.t - ag.t_edge[rows]) - free_t
-        self.metrics.on_junction(self.t, net.mv_node[nxt[rows] - net.n_edges], delay)
+        m = nxt[rows] - net.n_edges
+        self.metrics.on_junction(self.t, net.mv_node[m], delay, self.sig[m] == RED)
         ag.pos[rows] -= net.link_len[e]
         ag.lane_in[rows] = ag.lane[rows]
         ag.lane[rows] = net.movement_lane(nxt[rows], ag.lane[rows])
@@ -209,6 +214,7 @@ class Engine:
             ag.lat[go_edge] = ag.next_lane[go_edge]
             ag.rptr[go_edge] += 1
             ag.t_edge[go_edge] = self.t
+            self.metrics.on_edge_enter(nxt[go_edge])
             nxt = self._next_links()
         if exited.any():
             self.metrics.on_exit(self.t, ag.view("t_sched")[exited], ag.view("t_free")[exited])
@@ -253,7 +259,8 @@ class Engine:
         self.spawner.step(self, self._index(), self.t)
         li = self._index()
         nxt = self._next_links()
-        admit(self, li, nxt, movement_states(self.plans, self.t))
+        self.sig, self.amber_left = movement_states(self.plans, self.t)
+        admit(self, li, nxt)
         gap, v_lead = leader_gaps(self, li, nxt)
         acc = self._accelerations(gap, v_lead, nxt)
         if len(lane_changes(self, li, nxt, gap, v_lead, acc)):
@@ -268,6 +275,7 @@ class Engine:
         self._clear_gridlock()
         if self.n_steps % max(1, round(self.cfg.frame_dt / self.cfg.dt)) == 0:
             self.metrics.sample(self.t, self.ag)
+            self.metrics.sample_usage(self.ag)
             self.recorder.capture(self.t, self.ag)
 
     def run(self) -> dict:

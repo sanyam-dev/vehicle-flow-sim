@@ -18,9 +18,9 @@ from app.geo.graph_builder import graph_signals
 from app.geo.lanes import (
     base_class,
     class_rank,
+    edge_lane_count,
     first,
     is_link,
-    lanes_per_direction,
     speed_limit_ms,
 )
 from app.sim.geometry import GeomTable, drop_end_hooks, polyline_length, substring
@@ -33,8 +33,11 @@ from app.sim.network_parts import (
     labels_for,
 )
 
-PASS, PRIORITY, SIGNAL, BOUNDARY = 0, 1, 2, 3
+PASS, PRIORITY, SIGNAL, BOUNDARY, ROUNDABOUT = 0, 1, 2, 3, 4
+JUNCTION_KINDS = (PRIORITY, SIGNAL, ROUNDABOUT)
+CONTROL_KINDS = {"signal": SIGNAL, "circle": ROUNDABOUT, "priority": PRIORITY}
 SIGNAL_MATCH_RADIUS_M = 30.0
+DIVERGE_SHARED_M = 8.0  # turn paths from one lane overlap for about this long
 MIN_EDGE_LEN_M = 4.0
 
 
@@ -48,6 +51,8 @@ class Network:
     node_id: np.ndarray
     node_xy: np.ndarray
     node_kind: np.ndarray
+    node_stop_s: np.ndarray
+    node_radius: np.ndarray
     node_label: list[str]
     node_ramp: list[str | None]
     n_edges: int
@@ -72,6 +77,8 @@ class Network:
     mv_conflicts: list[np.ndarray]
     mv_conflict_s: list[np.ndarray]
     mv_conflict_own: list[np.ndarray]
+    mv_shared: np.ndarray
+    mv_ring: np.ndarray
     mv_cross: list[np.ndarray]
     mv_cross_s: list[np.ndarray]
     mv_cross_own: list[np.ndarray]
@@ -157,9 +164,7 @@ def _edge_attrs(rows: list[tuple], pts: list[np.ndarray]) -> dict[str, np.ndarra
     pairs = {(r[0], r[1]) for r in rows}
     out = {k: [] for k in ("lanes", "vmax", "grade", "rank", "two_way", "closed", "added")}
     for (u, v, _, d), _p in zip(rows, pts, strict=True):
-        oneway = str(first(d.get("oneway"))).lower() in ("true", "yes", "1")
-        rev = str(first(d.get("reversed"))).lower() in ("true", "1")
-        n = int(d["n_lanes"]) if d.get("n_lanes") else lanes_per_direction(d, oneway, rev)
+        n = edge_lane_count(d)
         rank = class_rank(d.get("highway")) - (1 if is_link(d.get("highway")) else 0)
         out["lanes"].append(n)
         out["vmax"].append(speed_limit_ms(d))
@@ -188,24 +193,70 @@ def _trim(pts: list[np.ndarray], frm: np.ndarray, to: np.ndarray,
     return out
 
 
-def _node_kinds(G: nx.MultiDiGraph, xy: np.ndarray, nbrs: np.ndarray,
-                boundary: np.ndarray) -> np.ndarray:
-    """PASS / PRIORITY / SIGNAL / BOUNDARY for every node.
+def _base_neighbours(G: nx.MultiDiGraph, node_ids: np.ndarray) -> np.ndarray:
+    """Distinct neighbours per node, ignoring user-added flyovers and underpasses.
 
-    A junction (>= 3 distinct neighbours) is signalised when an OSM
-    traffic-signal point lies within SIGNAL_MATCH_RADIUS_M.
+    A node that only becomes a junction because a new grade-separated road
+    ends there is a ramp end, not a crossing that needs a signal.
+    """
+    def ramp(d: dict) -> bool:
+        return bool(d.get("added")) and d.get("grade") in ("bridge", "underpass")
+    out = []
+    for n in node_ids.tolist():
+        nb = {v for _, v, d in G.out_edges(n, data=True) if not ramp(d)}
+        nb |= {u for u, _, d in G.in_edges(n, data=True) if not ramp(d)}
+        out.append(len(nb - {n}))
+    return np.asarray(out)
+
+
+def circle_nodes(G: nx.MultiDiGraph, node_ids: np.ndarray, nbrs: np.ndarray,
+                 boundary: np.ndarray) -> np.ndarray:
+    """(N,) bool: junctions the scenario turned into a circle (roundabout)."""
+    want = np.asarray([G.nodes[n].get("control") == "circle" for n in node_ids.tolist()])
+    return want & (nbrs >= 3) & ~boundary
+
+
+def _node_kinds(G: nx.MultiDiGraph, node_ids: np.ndarray, xy: np.ndarray, nbrs: np.ndarray,
+                boundary: np.ndarray, crossing: set[int],
+                ramps: list[str | None]) -> np.ndarray:
+    """PASS / PRIORITY / SIGNAL / BOUNDARY / ROUNDABOUT for every node.
+
+    A junction (>= 3 distinct neighbours) is signalised by default when turn
+    paths cross there and it is not a ramp merge / diverge, or when an OSM
+    traffic-signal point lies within SIGNAL_MATCH_RADIUS_M. The scenario can
+    override any junction through the node attribute `control`
+    ("signal" | "circle" | "priority").
+
+    Args:
+        G: Road graph.
+        node_ids: (N,) node ids in index order.
+        xy: (N, 2) node coordinates.
+        nbrs: (N,) distinct neighbours per node.
+        boundary: (N,) entry/exit mask.
+        crossing: Node indices where turn paths cross.
+        ramps: Per node "merge" / "diverge" / None.
     """
     kind = np.where(nbrs >= 3, PRIORITY, PASS).astype(np.int8)
+    base_nbrs = _base_neighbours(G, node_ids)
+    for i in crossing:
+        if nbrs[i] >= 3 and base_nbrs[i] >= 3 and ramps[i] is None:
+            kind[i] = SIGNAL
     sig = np.asarray(graph_signals(G)).reshape(-1, 2)
     if len(sig):
         d = np.linalg.norm(xy[:, None, :] - sig[None, :, :], axis=2).min(axis=1)
         kind[(d <= SIGNAL_MATCH_RADIUS_M) & (nbrs >= 3)] = SIGNAL
-    for i, n in enumerate(sorted(G.nodes)):
-        override = G.nodes[n].get("signal")  # set by the scenario modifier
-        if override is not None and nbrs[i] >= 3:
-            kind[i] = SIGNAL if str(override).lower() in ("true", "1", "yes") else PRIORITY
+    for i, n in enumerate(node_ids.tolist()):
+        control = G.nodes[n].get("control")  # set by the scenario modifier
+        if control in CONTROL_KINDS and nbrs[i] >= 3:
+            kind[i] = CONTROL_KINDS[control]
     kind[boundary] = BOUNDARY
     return kind
+
+
+def _node_stop_s(G: nx.MultiDiGraph, node_ids: np.ndarray) -> np.ndarray:
+    """(N,) signal stop duration set on a node by the scenario, NaN where unset."""
+    vals = [G.nodes[n].get("signal_stop_s") for n in node_ids.tolist()]
+    return np.asarray([np.nan if v in (None, "") else float(v) for v in vals])
 
 
 def _ramps(rows: list[tuple], n_nodes: int) -> list[str | None]:
@@ -218,13 +269,15 @@ def _ramps(rows: list[tuple], n_nodes: int) -> list[str | None]:
     return [ramp_kind(i, o) for i, o in zip(ins, outs, strict=True)]
 
 
-def compile_network(G: nx.MultiDiGraph) -> Network:
+def compile_network(G: nx.MultiDiGraph, base: Network | None = None) -> Network:
     """Compile a projected, consolidated osmnx graph into a Network.
 
     Args:
         G: Graph from `graph_builder.load_or_build`, optionally modified by
            the scenario modifier (edge attrs `closed`, `lane_closures`,
-           `added`, `n_lanes`, `grade`).
+           `added`, `n_lanes`, `grade`; node attrs `control`, `signal_stop_s`).
+        base: The baseline Network when `G` is its scenario: junction labels
+           are then taken from it, so `J7` names the same junction in both.
     Returns:
         Engine-ready Network.
     """
@@ -239,31 +292,48 @@ def compile_network(G: nx.MultiDiGraph) -> Network:
     attrs = _edge_attrs(rows, full_pts)
     nbrs = np.asarray([len(set(G.predecessors(n)) | set(G.successors(n))) for n in node_ids])
     boundary = boundary_nodes(G, xy, nbrs)
-    radius = junction_radius(frm, to, attrs["lanes"], nbrs, boundary, len(node_ids), full_pts)
+    circle = circle_nodes(G, node_ids, nbrs, boundary)
+    radius = junction_radius(frm, to, attrs["lanes"], nbrs, boundary, len(node_ids), full_pts,
+                             circle)
     pts = _trim(full_pts, frm, to, radius)
     clo = closures_of(rows, pts, attrs)
     shape = EdgeShape(frm, to, pts, attrs["lanes"], attrs["vmax"], attrs["two_way"],
                       ~attrs["closed"])
-    mv = build_movements(shape, xy, boundary, side)
-    return _assemble(G, node_ids, xy, rows, pts, attrs, mv, boundary, nbrs, clo, side)
+    mv = build_movements(shape, xy, boundary, side, np.where(circle, radius, 0.0))
+    parts = (node_ids, xy, rows, pts, attrs, boundary, nbrs, clo, radius)
+    return _assemble(G, parts, mv, side, base)
 
 
-def _assemble(G, node_ids, xy, rows, pts, attrs, mv: Movements, boundary, nbrs, clo,
-              side) -> Network:
+def _shared_lengths(mv: Movements, kind: np.ndarray) -> np.ndarray:
+    """(M,) length over which turn paths leaving one in-edge lane share road space.
+
+    Ordinary turns separate within DIVERGE_SHARED_M; on a roundabout they
+    share the ring, so a vehicle follows the one ahead for its whole path.
+    """
+    on_ring = kind[np.asarray(mv.node, dtype=int)] == ROUNDABOUT if mv.node else np.zeros(0, bool)
+    return np.where(on_ring, np.asarray(mv.length, dtype=float), DIVERGE_SHARED_M)
+
+
+def _assemble(G, parts: tuple, mv: Movements, side: str, base: Network | None) -> Network:
     """Build the Network dataclass from the compiled parts (see compile_network)."""
+    node_ids, xy, rows, pts, attrs, boundary, nbrs, clo, radius = parts
     E, M = len(rows), len(mv.m_in)
     frm = np.asarray([r[0] for r in rows] + mv.node, dtype=np.int32)
     to = np.asarray([r[1] for r in rows] + mv.node, dtype=np.int32)
     names = [str(first(r[3].get("name")) or "") for r in rows]
-    kind = _node_kinds(G, xy, nbrs, boundary)
-    node_label, edge_road = labels_for(rows, xy, kind, BOUNDARY, (PRIORITY, SIGNAL))
+    ramps = _ramps(rows, len(xy))
+    kind = _node_kinds(G, node_ids, xy, nbrs, boundary, mv.crossing_nodes, ramps)
+    base_labels = dict(zip(base.node_id.tolist(), base.node_label, strict=True)) if base else {}
+    node_label, edge_road = labels_for(rows, xy, kind, BOUNDARY, JUNCTION_KINDS,
+                                       node_ids.tolist(), base_labels)
     usable = ~attrs["closed"]
     has_out = np.bincount(frm[:E][usable], minlength=len(xy)) > 0
     has_in = np.bincount(to[:E][usable], minlength=len(xy)) > 0
     return Network(
         driving_side=side, crs=str(G.graph["crs"]), area_id=str(G.graph.get("area_id", "")),
         node_id=node_ids, node_xy=xy, node_kind=kind, node_label=node_label,
-        node_ramp=_ramps(rows, len(xy)), n_edges=E,
+        node_stop_s=_node_stop_s(G, node_ids), node_radius=radius,
+        node_ramp=ramps, n_edges=E,
         edge_uvk=[r[2] for r in rows], edge_name=names, edge_road=edge_road,
         edge_highway=[base_class(r[3].get("highway")) for r in rows],
         edge_closed=attrs["closed"], edge_added=attrs["added"],
@@ -277,6 +347,8 @@ def _assemble(G, node_ids, xy, rows, pts, attrs, mv: Movements, boundary, nbrs, 
         mv_node=np.asarray(mv.node, np.int32), mv_turn=np.asarray(mv.turn, np.int8),
         mv_pref=np.asarray(mv.pref_lane, np.int8), mv_conflicts=mv.conflicts,
         mv_conflict_s=mv.conflict_s, mv_conflict_own=mv.conflict_own,
+        mv_shared=_shared_lengths(mv, kind),
+        mv_ring=kind[np.asarray(mv.node, dtype=int)] == ROUNDABOUT,
         mv_cross=[c[x] for c, x in zip(mv.conflicts, mv.crossing, strict=True)],
         mv_cross_s=[c[x] for c, x in zip(mv.conflict_s, mv.crossing, strict=True)],
         mv_cross_own=[c[x] for c, x in zip(mv.conflict_own, mv.crossing, strict=True)],

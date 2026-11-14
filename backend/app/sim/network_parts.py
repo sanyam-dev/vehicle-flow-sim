@@ -14,6 +14,7 @@ SNAP_DIST_M = 40.0
 LANE_WIDTH_M = 3.2
 LEG_CHORD_M = 30.0  # leg directions are measured over this distance from the node
 MAX_RADIUS_M = 25.0
+MIN_CIRCLE_RADIUS_M = 16.0
 
 
 def edge_polyline(attrs: dict, xy_u: np.ndarray, xy_v: np.ndarray) -> np.ndarray:
@@ -97,7 +98,8 @@ def _legs(node: int, frm: np.ndarray, to: np.ndarray, pts: list[np.ndarray],
 
 def junction_radius(frm: np.ndarray, to: np.ndarray, lanes: np.ndarray, nbrs: np.ndarray,
                     boundary: np.ndarray, n_nodes: int,
-                    pts: list[np.ndarray] | None = None) -> np.ndarray:
+                    pts: list[np.ndarray] | None = None,
+                    circle: np.ndarray | None = None) -> np.ndarray:
     """Physical half-size of each junction box in metres.
 
     Edges are trimmed by this radius; turn paths span the trimmed region.
@@ -113,12 +115,16 @@ def junction_radius(frm: np.ndarray, to: np.ndarray, lanes: np.ndarray, nbrs: np
         boundary: (N,) entry/exit node mask.
         n_nodes: Number of nodes.
         pts: Untrimmed edge polylines (optional).
+        circle: (N,) mask of roundabout junctions, which get at least
+            MIN_CIRCLE_RADIUS_M so a ring fits around the island.
     """
     max_lanes = np.zeros(n_nodes)
     np.maximum.at(max_lanes, frm, lanes)
     np.maximum.at(max_lanes, to, lanes)
     r = np.clip(3.0 + 1.6 * max_lanes, 6.0, 14.0)
     r[(nbrs < 3) | boundary] = 0.0
+    if circle is not None:
+        r[circle] = np.maximum(r[circle], MIN_CIRCLE_RADIUS_M)
     if pts is None:
         return r
     at_node: dict[int, list[int]] = {}
@@ -165,20 +171,38 @@ def closures_of(rows: list[tuple], pts: list[np.ndarray], attrs: dict) -> tuple:
 
 
 def labels_for(rows: list[tuple], xy: np.ndarray, kind: np.ndarray, boundary_kind: int,
-               junction_kinds: tuple) -> tuple[list[str], list[str]]:
+               junction_kinds: tuple, node_ids: list | None = None,
+               base_labels: dict | None = None) -> tuple[list[str], list[str]]:
     """Human labels: junctions J#, boundary B#, other nodes N#; roads R# per node pair.
 
     Nodes are numbered in reading order (north to south, west to east) so the
-    labels are stable for a given area.
+    labels are stable for a given area. A scenario passes the baseline's
+    labels: a node keeps its label while its class (J / B / N) is unchanged,
+    and nodes that are new or changed class get the next free numbers.
 
+    Args:
+        rows: Edge rows (u_i, v_i, key, attrs).
+        xy: (N, 2) node coordinates.
+        kind: (N,) node kinds.
+        boundary_kind: Kind value of boundary nodes.
+        junction_kinds: Kind values that count as junctions.
+        node_ids: Graph node id per index (needed with `base_labels`).
+        base_labels: node id -> label in the baseline network.
     Returns:
         (node_label list, edge_road list).
     """
+    base_labels = base_labels or {}
     order = np.lexsort((xy[:, 0], -xy[:, 1]))
     counters = {"J": 0, "B": 0, "N": 0}
+    for label in base_labels.values():
+        counters[label[0]] = max(counters[label[0]], int(label[1:]))
     node_label = [""] * len(xy)
     for i in order:
         prefix = "B" if kind[i] == boundary_kind else ("J" if kind[i] in junction_kinds else "N")
+        old = base_labels.get(node_ids[i]) if node_ids is not None else None
+        if old and old[0] == prefix:
+            node_label[i] = old
+            continue
         counters[prefix] += 1
         node_label[i] = f"{prefix}{counters[prefix]}"
     road_of: dict[frozenset, str] = {}

@@ -116,6 +116,19 @@ def lanes_per_direction(attrs: dict, oneway: bool, reversed_: bool) -> int:
     return int(min(max(n, 1), MAX_LANES))
 
 
+def edge_lane_count(attrs: dict) -> int:
+    """Lanes of one directed graph edge: the scenario's `n_lanes`, else from OSM tags.
+
+    Args:
+        attrs: Edge attribute dict (osmnx tags plus optional `n_lanes`).
+    """
+    if attrs.get("n_lanes"):
+        return int(attrs["n_lanes"])
+    oneway = str(first(attrs.get("oneway"))).lower() in ("true", "yes", "1")
+    rev = str(first(attrs.get("reversed"))).lower() in ("true", "1")
+    return lanes_per_direction(attrs, oneway, rev)
+
+
 def speed_limit_ms(attrs: dict) -> float:
     """Speed limit in m/s from `maxspeed`, falling back to the class default.
 

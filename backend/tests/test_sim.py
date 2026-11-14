@@ -51,9 +51,9 @@ def test_entry_rates_scale_with_level(G):
 
 
 def test_grid_compiles_with_signal_and_entries(G):
-    """Centre junction is signalised; all 12 stub ends are entries and exits."""
+    """Every crossing junction is signalised; all 12 stub ends are entries and exits."""
     net = compile_network(G)
-    assert (net.node_kind == SIGNAL).sum() == 1
+    assert (net.node_kind == SIGNAL).sum() == 9
     assert len(net.entries) == 12 and len(net.exits) == 12
     _, _, flow = prepare_baseline(G, "moderate", 9.0, CFG)
     assert flow.shape == (net.n_edges,) and flow.sum() > 0

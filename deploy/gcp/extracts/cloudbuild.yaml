@@ -3,7 +3,9 @@ steps:
 - name: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
   entrypoint: bash
   args: [build.sh]
-  env: [BUCKET=${_BUCKET}, REGIONS=${_REGIONS}]
+  env:
+  - BUCKET=${_BUCKET}
+  - REGIONS=${_REGIONS}
 substitutions:
   _BUCKET: ""
   _REGIONS: ""

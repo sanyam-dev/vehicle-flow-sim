@@ -1,0 +1,73 @@
+# CI/CD: every push and pull request is tested; a push to main that passes is
+# deployed to Cloud Run (image built by Cloud Build, see deploy/gcp/deploy.sh).
+#
+# GCP access uses Workload Identity Federation (no key file). One-time setup:
+#   PROJECT_ID=vehicle-sim-project REPO=sanyam-dev/vehicle-flow-sim ./deploy/gcp/setup-cicd.sh
+# which also sets the repository variables GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_DEPLOY_SA.
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check app tests
+      - run: uv run pytest -q -p no:warnings
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  deploy:
+    name: Deploy to Cloud Run
+    needs: [backend, frontend]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # One deploy at a time; a newer push waits for the running one.
+    concurrency:
+      group: deploy-cloud-run
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write  # OIDC token for Workload Identity Federation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Deploy
+        env:
+          PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          SKIP_SETUP: "1"
+        run: ./deploy/gcp/deploy.sh

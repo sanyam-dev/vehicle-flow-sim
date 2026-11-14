@@ -5,7 +5,9 @@ Serves the JSON API under /api and, when the built frontend exists
 API then share one origin, so the browser needs no CORS in production.
 """
 
-from contextlib import asynccontextmanager
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -17,14 +19,44 @@ from starlette.types import Scope
 from app.api.routes import router
 from app.config import get_settings
 from app.geo.seed import install_seed
-from app.runs import worker
+from app.runs import store, worker
+
+log = logging.getLogger(__name__)
+
+
+async def sweep_runs_forever(ttl_s: float, interval_s: float) -> None:
+    """Delete stale run folders now and then every `interval_s` seconds.
+
+    Run results live on the instance disk (memory-backed on Cloud Run), so
+    without this they would pile up until the instance restarts.
+
+    Args:
+        ttl_s: Age since a run's last write after which it is deleted (s).
+        interval_s: Pause between two sweeps (s).
+    """
+    while True:
+        try:
+            n = await asyncio.to_thread(store.sweep_stale_runs, ttl_s)
+            log.info("run sweep: deleted %d stale run(s)", n)
+        except OSError:
+            log.exception("run sweep failed")
+        await asyncio.sleep(interval_s)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Install shipped areas on start-up; shut the workers down with the API."""
+    """Install shipped areas and start the daily run sweeper; stop both with the API."""
     install_seed()
+    s = get_settings()
+    sweeper = None
+    if s.run_sweep_interval_h > 0:
+        sweeper = asyncio.create_task(
+            sweep_runs_forever(s.run_ttl_h * 3600, s.run_sweep_interval_h * 3600))
     yield
+    if sweeper:
+        sweeper.cancel()
+        with suppress(asyncio.CancelledError):
+            await sweeper
     worker.shutdown()
 
 

@@ -14,7 +14,7 @@ Measurements use the seeded Silk Board graph (`12.9097_77.6175_12.9223_77.6304`)
 
 | Severity | Fixed | Open |
 |----------|-------|------|
-| High     | 7     | 2    |
+| High     | 8     | 1    |
 | Medium   | 8     | 6    |
 | Low      | 4     | 7    |
 
@@ -53,13 +53,13 @@ driving through each other; trips that complete are delayed less:
 | F17 | Low | Frontend | Pending edits stayed after the place was changed and were then silently dropped by the server. | `components/ParamsPanel.svelte` `apply` | Code reading |
 | F18 | Low | Frontend | Closed lane numbers were sorted as text (`10` before `2`). | `components/RoadEditor.svelte` | Code reading |
 | F19 | Low | Frontend | The map could open at maximum zoom when it was laid out after the network arrived. | `lib/maplayers.js` `relock` | Seen in the browser |
+| F20 | High | Storage | Run folders were never deleted. On Cloud Run the disk is memory-backed, so memory grew with every run until the instance restarted. Runs not written to for 24 h are now deleted at start-up and then once a day (`RUN_TTL_H`, `RUN_SWEEP_INTERVAL_H`); a run whose worker is alive is kept. | `runs/store.py` `sweep_stale_runs`, `main.py` | Test `test_sweep_deletes_only_stale_finished_runs` |
 
 ## Open
 
 | ID | Sev. | Area | Bug | Where | Impact | How confirmed |
 |----|------|------|-----|-------|--------|---------------|
 | O1 | High | Engine / signals | Signals at every crossing junction with equal greens cut network throughput by about a third at light traffic (Silk Board, "less": 4,250 → 2,910 veh/h, mean speed 27.6 → 15.6 km/h, 195 signals instead of 3). This is the requested behaviour, listed here because of its size. | `sim/signals.py` | Every run is slower than before; the stop duration and the junction editor are the levers. | Measured |
-| O2 | High | Storage | Run folders are never deleted. On Cloud Run the disk is memory-backed, so memory grows with every run until the instance restarts. | `runs/store.py` | Instance can run out of memory. | Code reading |
 | O3 | Med. | Engine | A large junction that OSM maps as several nodes gets one independent signal per node. The signals are not coordinated, so vehicles stop inside the junction. | `sim/network.py` `_node_kinds` | Extra delay and queues at big junctions. | Code reading |
 | O4 | Med. | Engine | Vehicles are still drawn closer than 1.2 m where two OSM roads run together near a junction (about 330 pair-samples in 600 s at moderate traffic). They are on different roads, so the engine sees no conflict. | Geometry from OSM; `MAX_RADIUS_M` | Visible overlap at a few places. | Measured |
 | O5 | Med. | Engine | A circle can starve one entry under heavy flow; 1–4 vehicles per 15 minutes are then removed by the gridlock breaker. | `sim/ring.py` `entry_blocked` | Slight undercount of delay at busy circles. | Measured on the test grid |

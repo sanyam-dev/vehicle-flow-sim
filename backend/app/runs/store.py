@@ -124,3 +124,48 @@ def progress(run_id: str, request: dict) -> float:
     total = n_var * max(request["duration_s"] / CHUNK_FRAMES, 1.0)
     done = sum(len(list((d / v).glob("chunk_*.npz"))) for v in VARIANTS if (d / v).exists())
     return min(done / total, 1.0)
+
+
+def _last_activity(d: Path) -> float:
+    """Newest modification time (epoch s) among a run folder and its direct files.
+
+    Args:
+        d: Run folder.
+    Returns:
+        Epoch seconds of the most recent write (status, result, chunks folder).
+    """
+    times = [d.stat().st_mtime]
+    times += [p.stat().st_mtime for p in d.iterdir()]
+    return max(times)
+
+
+def sweep_stale_runs(max_age_s: float, now: float | None = None) -> int:
+    """Delete run folders not written to for longer than `max_age_s`.
+
+    A run whose worker is still alive is never deleted, however old. Folders
+    that are not valid run ids are left alone.
+
+    Args:
+        max_age_s: Age (s since the last write) after which a run is stale.
+        now: Current epoch time (tests); defaults to time.time().
+    Returns:
+        Number of run folders deleted.
+    """
+    import shutil
+
+    now = time.time() if now is None else now
+    removed = 0
+    for d in runs_root().iterdir():
+        if not d.is_dir() or not _RUN_ID.match(d.name):
+            continue
+        try:
+            status = read_json(d / "status.json") or {}
+            pid = status.get("pid")
+            if status.get("state") == "running" and isinstance(pid, int) and _alive(pid):
+                continue
+            if now - _last_activity(d) > max_age_s:
+                shutil.rmtree(d, ignore_errors=True)
+                removed += 1
+        except (OSError, ValueError):  # deleted concurrently or half-written
+            continue
+    return removed

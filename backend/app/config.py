@@ -28,6 +28,9 @@ class Settings(BaseSettings):
         sim_seed: Fixed random seed used by every simulation RNG.
         max_workers: Max concurrent per-session worker processes.
         worker_idle_timeout_s: Idle seconds before a worker process exits.
+        run_ttl_h: Hours after its last write when a finished run is deleted.
+        run_sweep_interval_h: Hours between two sweeps for stale runs (the
+            first sweep runs at start-up); 0 disables the sweeper.
         data_dir: Root folder for caches, run frames and sqlite files.
         cors_origins: Comma separated list of allowed browser origins (dev
             servers only; in production the frontend is served same-origin).
@@ -66,6 +69,8 @@ class Settings(BaseSettings):
     sim_seed: int = 42
     max_workers: int = 8
     worker_idle_timeout_s: int = 600
+    run_ttl_h: float = 24.0
+    run_sweep_interval_h: float = 24.0
     data_dir: Path = _REPO_ROOT / "data"
     cors_origins: str = "http://localhost:5173"
     static_dir: Path = _REPO_ROOT / "frontend" / "dist"

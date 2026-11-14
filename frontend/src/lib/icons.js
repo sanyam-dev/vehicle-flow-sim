@@ -79,3 +79,15 @@ export const LEGEND_SVG = {
   auto: '<svg viewBox="0 0 20 14" width="16" height="12"><rect x="1" y="1" width="18" height="12" rx="3" fill="#84cc16"/><rect x="3" y="2.5" width="11" height="9" rx="1.5" fill="#facc15"/></svg>',
   truck: '<svg viewBox="0 0 39 16" width="28" height="12"><rect x="1" y="1" width="27" height="14" rx="1.5" fill="#4f7fe0"/><rect x="29" y="1" width="9" height="14" rx="2.5" fill="#7aa7ff"/></svg>',
 };
+
+const ICON = (d) => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" `
+  + `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+
+/** Line icons of the map tool buttons. */
+export const TOOL_ICONS = {
+  plus: ICON('<path d="M12 5v14M5 12h14"/>'),
+  minus: ICON('<path d="M5 12h14"/>'),
+  satellite: ICON('<path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/>'),
+  pencil: ICON('<path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13.5 6.5l4 4"/>'),
+  heat: ICON('<path d="M4 18c3-8 5 4 8-4s5 2 8-8"/>'),
+};

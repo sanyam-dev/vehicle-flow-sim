@@ -9,7 +9,12 @@ export const DEFAULT_PARAMS = {
   warmup_s: 180,
   seed: 42,
   dt: 0.5,
+  signal_stop_s: 45,
 };
+
+/** Empty set of scenario edits. */
+export const noEdits = () => ({ close_edges: [], close_roads: [], close_lanes: [],
+                                map_edits: [], junction_edits: [] });
 
 const HISTORY = 90; // samples kept for sparklines
 
@@ -26,9 +31,15 @@ export const app = $state({
   network: null, // GeoJSON FeatureCollection
   variant: 'baseline', // which recorded run the map replays
   params: { ...DEFAULT_PARAMS },
-  edits: { close_edges: [], close_roads: [], close_lanes: [] },
+  edits: noEdits(),
   selected: null, // clicked road edge properties
+  selectedNode: null, // clicked junction properties
+  focusNode: null, // node index the map should bring into view
+  editMode: false, // pencil tool: the next two map clicks pick points
+  draft: { a: null, b: null }, // points picked so far: {lat, lon, name}
+  notice: '', // one-line message under the form (e.g. edits were cleared)
   satellite: false,
+  heat: false, // full speed heatmap instead of "only where slow"
   chat: [{ role: 'assistant', content: 'What should we simulate?' }],
   chatBusy: false,
   proposal: null, // RunRequest proposed by the chat agent
@@ -55,5 +66,6 @@ export function resetLive() {
 /** Number of pending scenario edits. */
 export function editCount() {
   const e = app.edits;
-  return e.close_edges.length + e.close_roads.length + e.close_lanes.length;
+  return e.close_edges.length + e.close_roads.length + e.close_lanes.length
+    + e.map_edits.length + e.junction_edits.length;
 }

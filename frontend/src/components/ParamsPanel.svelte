@@ -1,16 +1,25 @@
 <script>
   // Run parameters form + pending scenario edits; "Apply & restart" submits.
-  import { app, editCount } from '../lib/store.svelte.js';
+  import { app, editCount, noEdits } from '../lib/store.svelte.js';
   import { buildRequest, startRun } from '../lib/runs.js';
 
   const busy = $derived(app.status === 'queued' || app.status === 'running');
   const nEdits = $derived(editCount());
 
+  const EDIT_NAMES = { flyover: 'Flyover', underpass: 'Underpass', add_lane: 'Extra lane' };
+
   function apply(e) {
     e.preventDefault();
     const p = app.params;
+    app.notice = '';
+    // Edits are tied to the roads of one area: a new place starts without them.
+    if (app.request && p.place.trim() !== app.request.place && editCount()) {
+      app.edits = noEdits();
+      app.notice = 'The place changed, so the scenario edits made for the previous area were cleared.';
+    }
     startRun(buildRequest({ ...p, duration_s: Number(p.duration_s), warmup_s: Number(p.warmup_s),
-                            seed: Number(p.seed), dt: Number(p.dt) }));
+                            seed: Number(p.seed), dt: Number(p.dt),
+                            signal_stop_s: Number(p.signal_stop_s) }));
   }
 
   function removeEdit(kind, i) {
@@ -46,6 +55,11 @@
     <label>Random seed
       <input type="number" min="0" step="1" bind:value={app.params.seed} />
     </label>
+    <label class="full">Signal stop (red) duration, s
+      <input type="number" min="10" max="180" step="5" bind:value={app.params.signal_stop_s} />
+      <span class="hint">Red time of every approach at every traffic signal; all approaches get
+        equal green (at least 10 s, so 4 approaches wait 47 s or more).</span>
+    </label>
 
     {#if nEdits}
       <div class="full edits">
@@ -62,11 +76,21 @@
           <div class="edit"><span>Close lane{c.lanes.length > 1 ? 's' : ''} {c.lanes.join(', ') || 'all'} of “{c.road}”</span>
             <button type="button" onclick={() => removeEdit('close_lanes', i)} aria-label="Remove">×</button></div>
         {/each}
+        {#each app.edits.map_edits as m, i}
+          <div class="edit"><span>{EDIT_NAMES[m.kind]}: {m.a.name} → {m.b.name}</span>
+            <button type="button" onclick={() => removeEdit('map_edits', i)} aria-label="Remove">×</button></div>
+        {/each}
+        {#each app.edits.junction_edits as j, i}
+          <div class="edit"><span>{j.label}: {j.control === 'circle' ? 'circle' : `signal, ${j.stop_s} s red`}</span>
+            <button type="button" onclick={() => removeEdit('junction_edits', i)} aria-label="Remove">×</button></div>
+        {/each}
       </div>
     {:else}
-      <p class="full hint">Click a road on the map to close it, a direction or lanes. With no edits the run is baseline only.</p>
+      <p class="full hint">Click a road to close it, a junction to make it a signal or a circle, or use the
+        pencil on the map to add a flyover, underpass or lane. With no edits the run is baseline only.</p>
     {/if}
 
+    {#if app.notice}<p class="full hint">{app.notice}</p>{/if}
     {#if app.error}<p class="full err">{app.error}</p>{/if}
     <button class="btn full" type="submit" disabled={busy || app.backend !== 'live'}>
       {busy ? `Simulating… ${Math.round(app.progress * 100)}%` : 'Apply & restart'}

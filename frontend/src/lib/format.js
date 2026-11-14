@@ -41,6 +41,8 @@ export const KPI_INFO = {
   max_queue_veh: ['Max queue', 'veh', true],
   trips_completed: ['Trips completed', '', false],
   gridlock_removed: ['Gridlock removals', '', true],
+  overlaps: ['Vehicle overlaps', '', true],
+  hard_brakes: ['Hard-braking events', '', true],
   unserved_trips: ['Unserved trips', '', true],
 };
 

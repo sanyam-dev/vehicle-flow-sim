@@ -1,6 +1,7 @@
 <script>
-  // Simulation display: Leaflet map with the road network, vehicles,
-  // satellite toggle, zoom controls, legend and the road editor popup.
+  // Simulation display: Leaflet map locked to the simulated area, with the road
+  // network, vehicles, satellite toggle, the pencil (map editor), legend and
+  // the road / junction editor popups.
   import { onMount } from 'svelte';
   import L from 'leaflet';
   import { app } from '../lib/store.svelte.js';
@@ -8,8 +9,11 @@
   import { NetworkLayer } from '../lib/maplayers.js';
   import { VehicleLayer } from '../lib/vehiclelayer.js';
   import { MapSync } from '../lib/mapsync.js';
+  import { TOOL_ICONS } from '../lib/icons.js';
   import Legend from './Legend.svelte';
   import RoadEditor from './RoadEditor.svelte';
+  import JunctionEditor from './JunctionEditor.svelte';
+  import EditPanel from './EditPanel.svelte';
 
   const SAT_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
@@ -21,9 +25,10 @@
   let satLayer = null;
   let sync = null;
   let selectedId = null;
+  let hover = $state(null); // snapped road point under the cursor (edit mode)
 
   const junctionCount = $derived(
-    app.network?.features.filter((f) => ['signal', 'priority'].includes(f.properties.kind)).length ?? 0);
+    app.network?.features.filter((f) => ['signal', 'priority', 'roundabout'].includes(f.properties.kind)).length ?? 0);
   const signalCount = $derived(
     app.network?.features.filter((f) => f.properties.kind === 'signal').length ?? 0);
 
@@ -41,23 +46,50 @@
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   });
 
+  /** Edit mode: take the clicked point (snapped to a road) as point A, then B. */
+  function pick(latlng) {
+    const pt = netLayer.nearestRoad(latlng);
+    if (!pt) return;
+    if (!app.draft.a || app.draft.b) app.draft = { a: pt, b: null };
+    else app.draft = { a: app.draft.a, b: pt };
+  }
+
+  /** A road was clicked: pick a point in edit mode, else open the road editor. */
+  function onEdge(p, latlng) {
+    if (app.editMode) return pick(latlng);
+    app.selectedNode = null;
+    app.selected = { ...p };
+  }
+
+  /** A junction was clicked: open the junction editor (not while drawing). */
+  function onNode(p) {
+    if (app.editMode) return;
+    app.selected = null;
+    app.selectedNode = { ...p };
+  }
+
   /** Create the map, layers and click handlers. */
   function initMap() {
     // zoomAnimation off: roads (canvas) and vehicles (own canvas) then always move together.
     map = L.map(container, { zoomControl: false, zoomAnimation: false, minZoom: 12, maxZoom: 20,
-                             zoomSnap: 0.5 }).setView([12.916, 77.624], 15);
+                             zoomSnap: 0.25, maxBoundsViscosity: 1 }).setView([12.916, 77.624], 15);
     map.attributionControl.setPrefix('<a href="https://leafletjs.com">Leaflet</a>');
-    satLayer = L.tileLayer(SAT_URL, { maxZoom: 20, maxNativeZoom: 19, className: 'sat-tiles',
-                                      attribution: 'Imagery © Esri, Maxar, Earthstar Geographics' });
-    netLayer = new NetworkLayer(map, (p) => (app.selected = p ? { ...p } : null));
+    netLayer = new NetworkLayer(map, { onEdge, onNode });
     vehicles = new VehicleLayer().addTo(map);
-    map.on('click', () => (app.selected = null));
+    map.on('click', (e) => {
+      if (app.editMode) pick(e.latlng);
+      else Object.assign(app, { selected: null, selectedNode: null });
+    });
+    map.on('mousemove', (e) => { hover = app.editMode ? netLayer.nearestRoad(e.latlng) : null; });
+    map.on('mouseout', () => (hover = null));
     sync = new MapSync(netLayer, vehicles);
     player.renderer = (g, s, t) => sync.render(g, s, t);
-    const resize = new ResizeObserver(() => map.invalidateSize({ pan: false }));
+    const resize = new ResizeObserver(() => { map.invalidateSize({ pan: false }); netLayer.relock(); });
     resize.observe(container);
+    const esc = (e) => { if (e.key === 'Escape') Object.assign(app, { editMode: false, draft: { a: null, b: null } }); };
+    window.addEventListener('keydown', esc);
     ready = true;
-    return () => resize.disconnect();
+    return () => { resize.disconnect(); window.removeEventListener('keydown', esc); };
   }
 
   onMount(() => {
@@ -65,25 +97,67 @@
     return () => { stop(); player.renderer = null; map?.remove(); };
   });
 
-  // New network: draw it (with the grid) and fit the view.
+  // New network: draw it and lock the view (and the satellite tiles) to its area.
   $effect(() => {
     const net = app.network;
     if (!ready) return;
+    satLayer?.remove();
+    satLayer = null;
     if (!net) {
       netLayer.clear();
       vehicles.setData({ features: [] });
       return;
     }
+    const [w, s, e, n] = net.meta.area_bbox ?? net.meta.bbox;
+    satLayer = L.tileLayer(SAT_URL, { maxZoom: 20, maxNativeZoom: 19, className: 'sat-tiles',
+                                      bounds: [[s, w], [n, e]],
+                                      attribution: 'Imagery © Esri, Maxar, Earthstar Geographics' });
     netLayer.setNetwork(net);
     sync.setNetwork(net);
-    netLayer.fit(net.meta.bbox);
+    netLayer.lock([w, s, e, n]);
   });
+
+  // No area yet: nothing to look at, so the empty map cannot be dragged around.
+  $effect(() => {
+    if (!ready) return;
+    for (const h of [map.dragging, map.scrollWheelZoom, map.doubleClickZoom, map.touchZoom]) {
+      if (app.network) h.enable(); else h.disable();
+    }
+  });
+
+  $effect(() => {
+    const on = app.satellite && !!app.network;
+    if (!ready || !satLayer) return;
+    if (on) satLayer.addTo(map); else satLayer.remove();
+  });
+
+  // Which run is shown: roads, lanes, junction controls and signal timings.
+  $effect(() => {
+    const variant = app.variant;
+    const signals = app.result?.signals?.[variant] ?? null;
+    if (!ready || !app.network) return;
+    netLayer.setVariant(app.result?.scenario ? variant : 'scenario');
+    netLayer.setSignals(signals);
+  });
+
+  $effect(() => { if (ready) netLayer.setHeat(app.heat); });
 
   // Closed roads: pending edits + (scenario view) the run's own closures.
   $effect(() => {
     const pending = app.edits.close_edges.slice();
     const showRun = app.variant === 'scenario';
     if (ready && app.network) sync.applyClosures(pending, showRun);
+  });
+
+  // Pending map edits, the edit being drawn, and edited junctions.
+  $effect(() => {
+    const edits = app.edits.map_edits.slice();
+    const draft = { ...app.draft };
+    const ids = new Set(app.edits.junction_edits.map((j) => j.node));
+    const cursor = app.editMode && !(draft.a && draft.b) ? hover : null;
+    if (!ready || !app.network) return;
+    netLayer.setPreviews(edits, draft, cursor);
+    netLayer.setNodeEdits(ids);
   });
 
   // Selection highlight.
@@ -94,14 +168,22 @@
     selectedId = id;
   });
 
+  // A junction picked elsewhere (metrics table): bring it into view.
   $effect(() => {
-    if (!ready) return;
-    if (app.satellite) satLayer.addTo(map);
-    else satLayer.remove();
+    const node = app.focusNode;
+    if (ready && node !== null && node !== undefined) {
+      netLayer.focusNode(node);
+      app.focusNode = null;
+    }
   });
+
+  function toggleEdit() {
+    Object.assign(app, { editMode: !app.editMode, draft: { a: null, b: null },
+                         selected: null, selectedNode: null });
+  }
 </script>
 
-<div class="map-wrap">
+<div class="map-wrap" class:drawing={app.editMode}>
   <!-- Leaflet owns the inner div. If the stylesheet is not applied yet when the
        map is created (Safari), Leaflet writes an inline position: relative on its
        container; sizing with width/height 100% inside the positioned outer box
@@ -127,14 +209,26 @@
   {/if}
 
   <div class="tools">
-    <button class="tool" title="Zoom in" onclick={() => map?.zoomIn()}>+</button>
-    <button class="tool" title="Zoom out" onclick={() => map?.zoomOut()}>−</button>
-    <button class="tool sat" class:on={app.satellite} title="Satellite reference"
-            onclick={() => (app.satellite = !app.satellite)}>SAT</button>
+    <button class="tool" title="Zoom in" aria-label="Zoom in" onclick={() => map?.zoomIn()}>{@html TOOL_ICONS.plus}</button>
+    <button class="tool" title="Zoom out (limited to the simulated area)" aria-label="Zoom out"
+            onclick={() => map?.zoomOut()}>{@html TOOL_ICONS.minus}</button>
+    <button class="tool" class:on={app.satellite} title="Satellite reference" aria-label="Satellite reference"
+            aria-pressed={app.satellite} disabled={!app.network}
+            onclick={() => (app.satellite = !app.satellite)}>{@html TOOL_ICONS.satellite}</button>
+    <button class="tool" class:on={app.editMode} aria-pressed={app.editMode} disabled={!app.network}
+            title="Edit the map: add a flyover, underpass or lane between two points"
+            aria-label="Edit the map" onclick={toggleEdit}>{@html TOOL_ICONS.pencil}</button>
+    <button class="tool" class:on={app.heat} aria-pressed={app.heat} disabled={!app.network}
+            title="Colour every road by speed" aria-label="Speed heatmap"
+            onclick={() => (app.heat = !app.heat)}>{@html TOOL_ICONS.heat}</button>
   </div>
 
-  {#if app.selected}
+  {#if app.editMode}
+    <EditPanel />
+  {:else if app.selected}
     <RoadEditor />
+  {:else if app.selectedNode}
+    <JunctionEditor />
   {/if}
 
   <Legend />
@@ -145,19 +239,21 @@
               border-radius: var(--radius); overflow: hidden; background: var(--map-bg); }
   .map { position: absolute; inset: 0; z-index: 0; } /* own stacking context: Leaflet panes stay under the overlays */
   .map-inner { width: 100%; height: 100%; }
-  .card { position: absolute; background: rgba(17, 23, 32, 0.92); border: 1px solid var(--line);
-          border-radius: 8px; padding: 10px 12px; }
+  .drawing :global(.leaflet-container) { cursor: crosshair; }
+  .card { position: absolute; background: var(--glass); border: 1px solid var(--line);
+          border-radius: 10px; padding: 10px 12px; backdrop-filter: blur(6px); }
   .net-card { top: 14px; left: 14px; max-width: 60%; }
   .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em;
              text-transform: uppercase; color: var(--muted); }
   .net-title { font-weight: 600; margin-top: 3px; }
   .net-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-  .tools { position: absolute; top: 14px; right: 14px; display: flex; flex-direction: column; gap: 8px; }
-  .tool { width: 38px; height: 38px; border-radius: 8px; background: rgba(17, 23, 32, 0.92);
-          border: 1px solid var(--line); color: var(--text); font-size: 18px; }
-  .tool:hover { border-color: var(--line-strong); }
-  .sat { font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em; }
-  .sat.on { background: var(--accent); color: #111; border-color: var(--accent); }
+  .tools { position: absolute; top: 14px; right: 14px; display: flex; flex-direction: column; gap: 6px; }
+  .tool { width: 36px; height: 36px; border-radius: 9px; background: var(--glass); display: grid;
+          place-items: center; border: 1px solid var(--line); color: var(--text-2);
+          backdrop-filter: blur(6px); }
+  .tool:hover:not(:disabled) { border-color: var(--line-strong); color: var(--text); }
+  .tool:disabled { opacity: 0.4; }
+  .tool.on { background: var(--accent); color: #17130a; border-color: var(--accent); }
   .empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center;
            gap: 12px; color: var(--muted); text-align: center; padding: 24px; pointer-events: none; }
   .spinner { width: 28px; height: 28px; border-radius: 50%; border: 3px solid var(--line);

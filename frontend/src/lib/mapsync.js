@@ -50,6 +50,7 @@ export class MapSync {
     const summary = app.result?.[app.variant];
     const mi = minuteIndex(summary, t);
     if (mi !== this.lastMinute) this.applyMinute(summary, mi);
+    this.net.updateSignals(t);
     const sec = Math.floor(t);
     if (sec !== this.lastSecond) {
       this.lastSecond = sec;

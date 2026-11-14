@@ -25,7 +25,7 @@
   /** Close the chosen lanes on every edge that carries this road name. */
   function closeLanes() {
     if (!sel.name || !lanes.length) return;
-    app.edits.close_lanes.push({ road: sel.name, lanes: [...lanes].sort() });
+    app.edits.close_lanes.push({ road: sel.name, lanes: [...lanes].sort((x, y) => x - y) });
     lanes = [];
   }
 </script>
@@ -64,8 +64,8 @@
 
 <style>
   .editor { position: absolute; left: 14px; top: 92px; width: min(340px, calc(100% - 28px));
-            background: rgba(17, 23, 32, 0.96); border: 1px solid var(--line-strong);
-            border-radius: 10px; padding: 12px; display: grid; gap: 10px; }
+            background: var(--glass-strong); border: 1px solid var(--line-strong);
+            border-radius: 12px; padding: 12px; display: grid; gap: 10px; backdrop-filter: blur(8px); }
   .head { display: flex; justify-content: space-between; gap: 8px; }
   .name { font-weight: 600; }
   .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }

@@ -28,7 +28,12 @@ export function runFromHash() {
 export function buildRequest(params) {
   const e = app.edits;
   return { ...params, close_edges: [...e.close_edges], close_roads: [...e.close_roads],
-           close_lanes: e.close_lanes.map((c) => ({ road: c.road, lanes: [...c.lanes] })) };
+           close_lanes: e.close_lanes.map((c) => ({ road: c.road, lanes: [...c.lanes] })),
+           map_edits: e.map_edits.map(({ kind, a, b, lanes, both_directions }) => (
+             { kind, lanes, both_directions, a: { lat: a.lat, lon: a.lon },
+               b: { lat: b.lat, lon: b.lon } })),
+           junction_edits: e.junction_edits.map(({ node, control, stop_s }) => (
+             { node, control, stop_s: control === 'signal' ? stop_s : null })) };
 }
 
 /** Show the loaded run's parameters in the form. */
@@ -47,6 +52,7 @@ export async function startRun(request) {
   Object.assign(app.live, { count: 0, meanKmh: 0, stoppedShare: 0, minute: null });
   Object.assign(app, { status: 'queued', stage: 'submitting', progress: 0, error: '',
                        result: null, network: null, request, selected: null,
+                       selectedNode: null, editMode: false, draft: { a: null, b: null },
                        startedAt: Date.now() });
   try {
     const { id } = await api.createRun(request);
@@ -105,7 +111,11 @@ export async function poll(id, { forgetIfMissing = false } = {}) {
     Object.assign(app, { status: run.state, stage: run.stage ?? '', progress: run.progress ?? 0,
                          error: run.error ?? '', request: run.request });
     if (run.request && app.status === 'done') syncParams(run.request);
-    if (run.has_network && !app.network) app.network = await api.network(id);
+    if (run.has_network && !app.network) {
+      const net = await api.network(id);
+      if (token !== pollToken) return; // a newer run started while this was loading
+      app.network = net;
+    }
     if (run.state === 'done') return finish(id, run.result);
     if (run.state === 'error') return;
     if (stalled(run)) {

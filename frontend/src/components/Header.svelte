@@ -1,7 +1,7 @@
 <script>
   // Top bar: brand, scenario name, run status, sim clock, variant switch,
   // export and new-run actions.
-  import { app, DEFAULT_PARAMS } from '../lib/store.svelte.js';
+  import { app, DEFAULT_PARAMS, noEdits } from '../lib/store.svelte.js';
   import { player } from '../lib/player.svelte.js';
   import { attachVariant } from '../lib/runs.js';
   import { clockAt, hms } from '../lib/format.js';
@@ -34,7 +34,8 @@
     player.pause();
     app.chat = [{ role: 'assistant', content: 'What should we simulate?' }];
     app.proposal = null;
-    app.edits = { close_edges: [], close_roads: [], close_lanes: [] };
+    app.edits = noEdits();
+    Object.assign(app, { editMode: false, draft: { a: null, b: null }, selectedNode: null, notice: '' });
     app.params = { ...DEFAULT_PARAMS };
     app.selected = null;
     document.querySelector('.chat-input')?.focus();

@@ -3,7 +3,7 @@
   // turn (the backend agent is stateless); a ready proposal can be run.
   import { app } from '../lib/store.svelte.js';
   import { api, isDemo } from '../lib/api.js';
-  import { startRun } from '../lib/runs.js';
+  import { buildRequest, startRun } from '../lib/runs.js';
 
   const CHIPS = ['Rush hour at Silk Board Junction, Bengaluru at 9am',
                  'Close lane 0 of Hosur Road',
@@ -33,7 +33,8 @@
     const timer = setTimeout(() => { slow = true; }, SLOW_MS);
     try {
       const history = app.chat.map(({ role, content }) => ({ role, content }));
-      const r = await api.chat(history, { ...app.params, ...app.edits });
+      const { close_edges, close_roads, close_lanes } = app.edits;
+      const r = await api.chat(history, { ...app.params, close_edges, close_roads, close_lanes });
       app.chat.push({ role: 'assistant', content: r.reply });
       app.proposal = r.ready ? r.params : null;
     } catch (err) {
@@ -48,11 +49,12 @@
   /** Copy the proposal into the form + edits, then start the run. */
   function runProposal() {
     const p = app.proposal;
-    const { close_edges, close_roads, close_lanes, ...params } = p;
-    app.params = { ...app.params, ...params };
-    app.edits = { close_edges: [...app.edits.close_edges, ...close_edges],
+    const { close_edges, close_roads, close_lanes, map_edits, junction_edits, ...params } = p;
+    for (const k of Object.keys(app.params)) if (params[k] != null) app.params[k] = params[k];
+    // The agent only knows closures; edits drawn on the map are kept as they are.
+    app.edits = { ...app.edits, close_edges: [...new Set([...app.edits.close_edges, ...close_edges])],
                   close_roads, close_lanes };
-    startRun({ ...p, close_edges: app.edits.close_edges });
+    startRun(buildRequest({ ...app.params }));
     app.proposal = null;
   }
 

@@ -1,118 +1,88 @@
-// Leaflet layers for the road network, drawn on one shared canvas renderer.
+// Leaflet layers for the road network.
 //
-// * Roads are coloured by r = edge speed / speed limit for the current minute
-//   (from the run's speed heatmap); r = null means no data yet.
+// Design: roads are neutral slate so the map stays calm; colour is reserved
+// for information. A road turns amber / red only where traffic is slow or
+// jammed (or everywhere, with the speed heatmap switched on).
+//
+// * Stacking uses one canvas pane per level: underpass (below, dark with
+//   dashed blue edges), road, flyover (above, violet edges and a shadow).
 // * Two-way roads are shifted sideways (towards the driving side) so each
 //   direction is visible; widths follow lane counts at true scale (3.2 m/lane).
-// * A casing under each road marks flyovers / underpasses and the selection.
-// * Closed roads are drawn red and dashed. Junction dots are coloured by queue.
-// Draw order is insertion order: grid, casings, roads, junctions.
+// * Junctions: signals show a stop bar per approach in the live light colour,
+//   circles are drawn as an island, every junction carries its id (J#).
+// * All mouse handling goes through one invisible "hit" pane on top, because
+//   stacked canvases would otherwise hide each other's events.
 
 import L from 'leaflet';
+import { COLORS, LANE_M, byZoom, metresPerPixel, offsetLine, gridLines, speedColor,
+         stopBar } from './mapgeom.js';
 
-export const COLORS = {
-  bg: '#0d121a', grid: '#161e2a', nodata: '#3a4658', free: '#2ec4a5', slow: '#f5a524',
-  jam: '#ef4444', bridge: '#b392f0', underpass: '#5aa9ff', closed: '#ef4444', select: '#ffffff',
-  casing: '#1d2633', boundary: '#7d8aa0', junction: '#5d6b80',
-};
+export { COLORS, speedColor } from './mapgeom.js';
 
-const LANE_M = 3.2;
-const M_PER_DEG = 111320;
-const SPEED_STOPS = [[0.15, COLORS.jam], [0.45, COLORS.slow], [0.75, COLORS.free]];
-const QUEUE_COLORS = { [-1]: COLORS.junction, 0: COLORS.free, 1: COLORS.slow, 2: COLORS.jam };
+const PANES = [['grid', 350], ['underpass', 380], ['road', 400], ['bridge', 410],
+               ['nodes', 420], ['edit', 430], ['hit', 440]];
+const GRADE_PANE = { bridge: 'bridge', underpass: 'underpass' };
+const MAJOR = new Set(['motorway', 'trunk', 'primary']);
+const MID = new Set(['secondary', 'tertiary']);
+const JUNCTIONS = new Set(['signal', 'priority', 'roundabout']);
+const QUEUE_COLORS = { 1: COLORS.slow, 2: COLORS.jam };
+const LIGHTS = { red: COLORS.jam, amber: COLORS.slow, green: COLORS.free };
+const SLOW_BELOW = 0.6; // speed ratio under which a road is tinted without the heatmap
+const LABEL_ZOOM = 17; // junction ids appear once the user zooms in
+const LABEL_GAP_PX = 44;
+export const EDIT_COLORS = { flyover: COLORS.bridge, underpass: COLORS.underpass,
+                             add_lane: COLORS.edit };
 
-/** '#rrggbb' -> [r, g, b]. */
-function rgb(hex) {
-  return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+/** Tooltip text of a road. */
+function roadTip(p) {
+  const grade = p.grade === 'bridge' ? ' · flyover' : p.grade === 'underpass' ? ' · underpass' : '';
+  return `<b>${p.name || 'Unnamed road'}</b><br>${p.road} · ${p.highway} · ${p.lanes} lane`
+    + `${p.lanes > 1 ? 's' : ''}${grade}`;
 }
 
-/**
- * Colour for a speed ratio (linear blend between the jam / slow / free stops).
- * @param {number|null} r speed / limit, 0..1, or null for no data
- */
-export function speedColor(r) {
-  if (r === null || r === undefined) return COLORS.nodata;
-  if (r <= SPEED_STOPS[0][0]) return SPEED_STOPS[0][1];
-  for (let i = 1; i < SPEED_STOPS.length; i++) {
-    const [r1, c1] = SPEED_STOPS[i];
-    if (r <= r1) {
-      const [r0, c0] = SPEED_STOPS[i - 1];
-      const u = (r - r0) / (r1 - r0);
-      const [a, b] = [rgb(c0), rgb(c1)];
-      return `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * u)).join(',')})`;
-    }
-  }
-  return SPEED_STOPS.at(-1)[1];
-}
-
-/** Metres per screen pixel at zoom z and latitude lat. */
-function metresPerPixel(z, lat) {
-  return (156543.03 * Math.cos((lat * Math.PI) / 180)) / 2 ** z;
-}
-
-/**
- * Shift a [lon, lat] polyline sideways.
- * @param {number[][]} coords GeoJSON coordinates
- * @param {number} d metres; positive = left of the travel direction
- * @returns {number[][]} Leaflet [lat, lon] points
- */
-export function offsetLine(coords, d) {
-  const kx = M_PER_DEG * Math.cos((coords[0][1] * Math.PI) / 180);
-  const pts = coords.map(([lon, lat]) => [lon * kx, lat * M_PER_DEG]);
-  return pts.map((p, i) => {
-    const a = pts[Math.max(i - 1, 0)];
-    const b = pts[Math.min(i + 1, pts.length - 1)];
-    const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
-    const [nx, ny] = [-(b[1] - a[1]) / len, (b[0] - a[0]) / len]; // left normal
-    return [(p[1] + d * ny) / M_PER_DEG, (p[0] + d * nx) / kx];
-  });
-}
-
-/**
- * Faint reference grid (~100 m) covering the bbox, as Leaflet polylines points.
- * @param {[number, number, number, number]} bbox west, south, east, north
- */
-export function gridLines([w, s, e, n]) {
-  const dLat = 100 / M_PER_DEG;
-  const dLon = dLat / Math.cos(((s + n) / 2) * (Math.PI / 180));
-  const lines = [];
-  for (let x = Math.floor(w / dLon) * dLon; x <= e; x += dLon) lines.push([[s, x], [n, x]]);
-  for (let y = Math.floor(s / dLat) * dLat; y <= n; y += dLat) lines.push([[y, w], [y, e]]);
-  return lines;
-}
-
-/** Piecewise-linear interpolation of [zoom, value] stops. */
-function byZoom(z, stops) {
-  if (z <= stops[0][0]) return stops[0][1];
-  for (let i = 1; i < stops.length; i++) {
-    const [z1, v1] = stops[i];
-    const [z0, v0] = stops[i - 1];
-    if (z <= z1) return v0 + ((z - z0) / (z1 - z0)) * (v1 - v0);
-  }
-  return stops.at(-1)[1];
+/** Tooltip text of a junction. */
+function nodeTip(p) {
+  const kind = { signal: 'traffic signal', roundabout: 'circle', priority: 'give way' }[p.kind];
+  return `<b>${p.label}</b> · ${kind}${p.stop_s ? ` · ${p.stop_s} s red` : ''}`;
 }
 
 /** Road network on a Leaflet map: build once per network, then restyle cheaply. */
 export class NetworkLayer {
   /**
    * @param {L.Map} map
-   * @param {(props: object|null) => void} onSelect called with the clicked edge's properties
+   * @param {{onEdge: (props: object, latlng: L.LatLng) => void,
+   *          onNode: (props: object) => void}} handlers click callbacks
    */
-  constructor(map, onSelect) {
+  constructor(map, handlers) {
     this.map = map;
-    this.onSelect = onSelect;
-    this.renderer = L.canvas({ padding: 0.3, tolerance: 6 });
+    this.handlers = handlers;
+    this.r = {};
+    for (const [name, z] of PANES) {
+      const pane = map.createPane(`vf-${name}`);
+      pane.style.zIndex = z;
+      if (name !== 'hit') pane.style.pointerEvents = 'none';
+      this.r[name] = L.canvas({ pane: `vf-${name}`, padding: 0.3, tolerance: 4 });
+    }
     this.group = L.layerGroup().addTo(map);
-    this.edges = new Map(); // edge id -> {p, casing, road, r, closed, sel}
-    this.nodes = new Map(); // node index -> {p, marker, q}
+    this.editGroup = L.layerGroup().addTo(map);
+    this.labelGroup = L.layerGroup().addTo(map);
+    this.barGroup = L.layerGroup().addTo(map);
+    this.edges = new Map(); // edge id -> {p, line, casing, road, shadow, hit, r, closed, sel}
+    this.nodes = new Map(); // node index -> {p, latlng, marker, island, q, edit}
+    this.bars = []; // {bar, cycle, offset, amber, start, green, state}
+    this.variant = 'baseline';
+    this.heat = false;
+    this.bounds = null;
     map.on('zoomend', () => this.restyle());
+    map.on('moveend', () => this.#relabel(this.map.getZoom()));
   }
 
   /** Remove everything. */
   clear() {
-    this.group.clearLayers();
+    for (const g of [this.group, this.editGroup, this.labelGroup, this.barGroup]) g.clearLayers();
     this.edges.clear();
     this.nodes.clear();
+    this.bars = [];
   }
 
   /**
@@ -122,63 +92,188 @@ export class NetworkLayer {
   setNetwork(net) {
     this.clear();
     const sign = (net.meta?.driving_side ?? 'left') === 'left' ? 1 : -1;
-    const opts = { renderer: this.renderer, interactive: false };
-    for (const pts of gridLines(net.meta.bbox)) {
-      L.polyline(pts, { ...opts, color: COLORS.grid, weight: 1 }).addTo(this.group);
+    for (const pts of gridLines(net.meta.area_bbox ?? net.meta.bbox)) {
+      L.polyline(pts, { renderer: this.r.grid, interactive: false, color: COLORS.grid, weight: 1 })
+        .addTo(this.group);
     }
     const edges = net.features.filter((f) => f.properties.kind === 'edge');
-    const lines = edges.map((f) => {
-      const p = f.properties;
-      const d = p.two_way ? sign * (p.lanes * LANE_M / 2 + 0.3) : 0;
-      return d ? offsetLine(f.geometry.coordinates, d)
-               : f.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-    });
-    const casings = lines.map((pts) => L.polyline(pts, opts).addTo(this.group));
-    edges.forEach((f, i) => {
-      const p = f.properties;
-      const road = L.polyline(lines[i], { renderer: this.renderer, bubblingMouseEvents: false })
-        .on('click', () => this.onSelect?.(p)).addTo(this.group);
-      this.edges.set(p.edge, { p, casing: casings[i], road, r: null, closed: false, sel: false });
-    });
-    for (const f of net.features) {
-      const p = f.properties;
-      if (p.kind === 'edge') continue;
-      const [lon, lat] = f.geometry.coordinates;
-      const marker = L.circleMarker([lat, lon], opts).addTo(this.group);
-      this.nodes.set(p.node, { p, marker, q: -1 });
-    }
+    for (const f of edges) this.#addEdge(f, sign);
+    for (const e of this.edges.values()) e.road.addTo(this.group); // roads above all casings
+    for (const e of this.edges.values()) e.hit.addTo(this.group);
+    for (const f of net.features) if (f.properties.kind !== 'edge') this.#addNode(f);
     this.restyle();
   }
 
-  /** Re-apply every style (after zoom or a new network). */
+  #addEdge(f, sign) {
+    const p = f.properties;
+    const d = p.two_way ? sign * (p.lanes * LANE_M / 2 + 0.3) : 0;
+    const line = d ? offsetLine(f.geometry.coordinates, d)
+                   : f.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    const opts = { renderer: this.r[GRADE_PANE[p.grade] ?? 'road'], interactive: false };
+    const shadow = p.grade === 'bridge' ? L.polyline(line, opts).addTo(this.group) : null;
+    const casing = L.polyline(line, opts).addTo(this.group);
+    const road = L.polyline(line, opts);
+    const e = { p, line, casing, road, shadow, r: null, closed: false, sel: false };
+    e.hit = L.polyline(line, { renderer: this.r.hit, opacity: 0, bubblingMouseEvents: false })
+      .bindTooltip(roadTip(p), { sticky: true, className: 'map-tip', direction: 'top', offset: [0, -6] })
+      .on('click', (ev) => this.#visible(e) && this.handlers.onEdge?.(p, ev.latlng));
+    this.edges.set(p.edge, e);
+  }
+
+  #addNode(f) {
+    const p = f.properties;
+    const [lon, lat] = f.geometry.coordinates;
+    const opts = { renderer: this.r.nodes, interactive: false };
+    const n = { p, latlng: L.latLng(lat, lon), q: -1, edit: false };
+    n.island = L.circle(n.latlng, { ...opts, radius: p.ring_m ?? 8 })
+      .addTo(this.group);
+    n.marker = L.circleMarker(n.latlng, opts).addTo(this.group);
+    if (JUNCTIONS.has(p.kind)) {
+      L.circleMarker(n.latlng, { renderer: this.r.hit, radius: 10, opacity: 0, fillOpacity: 0,
+                                 bubblingMouseEvents: false })
+        .bindTooltip(nodeTip(p), { className: 'map-tip', direction: 'top', offset: [0, -8] })
+        .on('click', () => this.handlers.onNode?.(p)).addTo(this.group);
+    }
+    this.nodes.set(p.node, n);
+  }
+
+  /** Is this edge part of the variant being shown? (added roads: scenario only) */
+  #visible(e) {
+    return !(this.variant === 'baseline' && e.p.added);
+  }
+
+  /** Lanes of an edge in the shown variant. */
+  #lanes(e) {
+    return this.variant === 'baseline' ? (e.p.base_lanes || e.p.lanes) : e.p.lanes;
+  }
+
+  /** Node kind in the shown variant. */
+  #kind(n) {
+    return this.variant === 'baseline' ? (n.p.base_kind ?? n.p.kind) : n.p.kind;
+  }
+
+  /** Re-apply every style (after zoom, a new network or a view switch). */
   restyle() {
     const z = this.map.getZoom();
     const mpp = metresPerPixel(z, this.map.getCenter().lat);
     for (const e of this.edges.values()) this.#styleEdge(e, z, mpp);
     for (const n of this.nodes.values()) this.#styleNode(n, z);
+    for (const b of this.bars) b.bar.setStyle({ weight: byZoom(z, [[16.4, 0], [16.5, 2], [19, 5]]) });
+    this.#relabel(z);
+  }
+
+  /** Road fill colour: neutral by class, tinted where slow (or always with the heatmap). */
+  #fill(e) {
+    if (e.closed) return COLORS.closed;
+    if (e.r !== null && e.r !== undefined && (this.heat || e.r < SLOW_BELOW)) return speedColor(e.r);
+    if (e.p.grade === 'underpass') return COLORS.roadUnder;
+    return MAJOR.has(e.p.highway) ? COLORS.roadMajor : MID.has(e.p.highway) ? COLORS.roadMid
+      : COLORS.roadMinor;
+  }
+
+  /** Casing (outline) style: selection, scenario change, grade, or plain. */
+  #casing(e, w) {
+    const lanes = this.#lanes(e);
+    const changed = this.variant === 'scenario' && (e.p.added || lanes > (e.p.base_lanes || lanes));
+    if (e.sel) return { color: COLORS.select, weight: w + 6, opacity: 0.7, dashArray: null };
+    if (changed) return { color: COLORS.edit, weight: w + 4, opacity: 1, dashArray: null };
+    if (e.p.grade === 'bridge') return { color: COLORS.bridge, weight: w + 4, opacity: 1, dashArray: null };
+    if (e.p.grade === 'underpass') {
+      return { color: COLORS.underpass, weight: w + 4, opacity: 0.9, dashArray: '5 5' };
+    }
+    return { color: COLORS.casing, weight: w + 2, opacity: 1, dashArray: null };
   }
 
   #styleEdge(e, z = this.map.getZoom(), mpp = metresPerPixel(z, this.map.getCenter().lat)) {
-    const w = Math.max(z >= 15 ? 1.2 : 0.7, (e.p.lanes * LANE_M) / mpp);
-    const grade = e.p.grade === 'bridge' ? COLORS.bridge
-      : e.p.grade === 'underpass' ? COLORS.underpass : COLORS.casing;
-    e.casing.setStyle({ color: e.sel ? COLORS.select : grade, weight: w + (e.sel ? 6 : 3),
-                        opacity: e.sel ? 0.6 : 1, lineCap: 'butt' });
-    e.road.setStyle({ color: e.closed ? COLORS.closed : speedColor(e.r), weight: w,
-                      dashArray: e.closed ? '4 4' : null, lineCap: 'butt',
-                      opacity: e.p.grade === 'underpass' ? 0.7 : 0.95 });
+    if (!this.#visible(e)) {
+      for (const l of [e.casing, e.road, e.shadow]) l?.setStyle({ opacity: 0 });
+      return;
+    }
+    const minor = !MAJOR.has(e.p.highway) && !MID.has(e.p.highway);
+    const w = Math.max(minor ? 0.8 : 1.6, (this.#lanes(e) * LANE_M) / mpp);
+    e.shadow?.setStyle({ color: '#000', weight: w + 10, opacity: 0.35, lineCap: 'butt' });
+    e.casing.setStyle({ ...this.#casing(e, w), lineCap: 'butt' });
+    e.road.setStyle({ color: this.#fill(e), weight: w, opacity: 1, lineCap: 'butt',
+                      dashArray: e.closed ? '4 4' : null });
+    e.hit.setStyle({ weight: Math.max(w + 4, 12) });
   }
 
   #styleNode(n, z = this.map.getZoom()) {
-    const { kind } = n.p;
+    const kind = this.#kind(n);
+    const hide = { opacity: 0, fillOpacity: 0 };
+    const edit = n.edit ? { color: COLORS.edit, weight: 2.5 } : null;
+    // The stroke is the ring road itself (one lane wide), the fill is the island.
+    const mpp = metresPerPixel(z, this.map.getCenter().lat);
+    n.island.setStyle(kind === 'roundabout'
+      ? { color: edit?.color ?? COLORS.roadMajor, weight: Math.max(LANE_M / mpp, 2), opacity: 1,
+          fillColor: COLORS.island, fillOpacity: 1 } : hide);
     if (kind === 'boundary') {
-      n.marker.setStyle({ radius: 2.5, color: COLORS.boundary, weight: 1,
+      n.marker.setStyle({ radius: 2.5, color: COLORS.boundary, weight: 1, opacity: 1,
                           fillColor: COLORS.bg, fillOpacity: 1 });
-      return;
+    } else if (kind === 'signal' || kind === 'priority') {
+      const signal = kind === 'signal';
+      n.marker.setStyle({ radius: signal ? byZoom(z, [[13, 2], [17, 5]]) : byZoom(z, [[13, 1], [17, 3]]),
+                          color: COLORS.bg, weight: 1.5, opacity: 1, fillOpacity: 1, ...edit,
+                          fillColor: QUEUE_COLORS[n.q] ?? (signal ? COLORS.light : COLORS.junction) });
+    } else {
+      n.marker.setStyle(kind === 'roundabout' && n.q > 0
+        ? { radius: 3, color: COLORS.bg, weight: 1, opacity: 1, fillColor: QUEUE_COLORS[n.q],
+            fillOpacity: 1 } : hide);
     }
-    const radius = kind === 'signal' ? byZoom(z, [[13, 3], [17, 7]]) : byZoom(z, [[13, 1.5], [17, 3.5]]);
-    n.marker.setStyle({ radius, color: COLORS.bg, weight: 1.5, fillOpacity: 1,
-                        fillColor: QUEUE_COLORS[n.q] ?? COLORS.junction });
+  }
+
+  /** Junction id labels for the junctions in view, thinned so they never overlap. */
+  #relabel(z) {
+    this.labelGroup.clearLayers();
+    if (z < LABEL_ZOOM) return;
+    const placed = [];
+    const rank = (n) => (this.#kind(n) === 'priority' ? 1 : 0);
+    const view = this.map.getBounds().pad(0.1);
+    const nodes = [...this.nodes.values()]
+      .filter((n) => JUNCTIONS.has(this.#kind(n)) && view.contains(n.latlng))
+      .sort((a, b) => rank(a) - rank(b));
+    for (const n of nodes) {
+      const pt = this.map.latLngToLayerPoint(n.latlng);
+      if (placed.some((q) => Math.abs(q.x - pt.x) < LABEL_GAP_PX && Math.abs(q.y - pt.y) < 14)) continue;
+      placed.push(pt);
+      L.tooltip({ permanent: true, direction: 'right', offset: [7, 0], className: 'jlabel' })
+        .setLatLng(n.latlng).setContent(n.p.label).addTo(this.labelGroup);
+    }
+  }
+
+  /**
+   * Draw one stop bar per signalised approach.
+   * @param {object[]|null} signals result.signals[variant]: controllers with phases
+   */
+  setSignals(signals) {
+    this.barGroup.clearLayers();
+    this.bars = [];
+    for (const c of signals ?? []) {
+      for (const ph of c.phases) {
+        for (const id of ph.edges) {
+          const e = this.edges.get(id);
+          if (!e) continue;
+          const bar = L.polyline(stopBar(e.line, (e.p.lanes * LANE_M) / 2),
+                                 { renderer: this.r.nodes, interactive: false, lineCap: 'round' })
+            .addTo(this.barGroup);
+          this.bars.push({ bar, cycle: c.cycle, offset: c.offset, amber: c.amber,
+                           start: ph.start, green: ph.green, state: '' });
+        }
+      }
+    }
+    this.restyle();
+  }
+
+  /** Colour every stop bar for simulation time t (seconds). */
+  updateSignals(t) {
+    for (const b of this.bars) {
+      const into = ((t + b.offset) % b.cycle) - b.start;
+      const state = into < 0 ? 'red' : into < b.green ? 'green' : into < b.green + b.amber ? 'amber' : 'red';
+      if (state !== b.state) {
+        b.state = state;
+        b.bar.setStyle({ color: LIGHTS[state] });
+      }
+    }
   }
 
   /** Speed ratio of one edge for the current minute (null = no data). */
@@ -205,8 +300,103 @@ export class NetworkLayer {
     if (e && e.sel !== on) { e.sel = on; this.#styleEdge(e); }
   }
 
-  /** Fit the map to the network's bbox [w, s, e, n]. */
-  fit([w, s, e, n]) {
-    this.map.fitBounds([[s, w], [n, e]], { padding: [40, 40], animate: false });
+  /** Show 'baseline' or 'scenario' roads, lanes and junction controls. */
+  setVariant(variant) {
+    if (variant !== this.variant) { this.variant = variant; this.restyle(); }
+  }
+
+  /** Full speed heatmap on / off. */
+  setHeat(on) {
+    if (on !== this.heat) { this.heat = on; this.restyle(); }
+  }
+
+  /** Outline junctions that have a pending edit. @param {Set<string>} ids node `osm` ids */
+  setNodeEdits(ids) {
+    for (const n of this.nodes.values()) {
+      const edit = ids.has(n.p.osm);
+      if (edit !== n.edit) { n.edit = edit; this.#styleNode(n); }
+    }
+  }
+
+  /**
+   * Draw pending map edits and the edit being drawn.
+   * @param {object[]} edits {kind, a: {lat, lon}, b: {lat, lon}}
+   * @param {{a: object|null, b: object|null}} draft points picked so far
+   * @param {object|null} hover snapped point under the cursor
+   */
+  setPreviews(edits, draft, hover) {
+    this.editGroup.clearLayers();
+    const opts = { renderer: this.r.edit, interactive: false };
+    const pin = (pt, color) => L.circleMarker([pt.lat, pt.lon], { ...opts, radius: 5, color: COLORS.bg,
+      weight: 2, fillColor: color, fillOpacity: 1 }).addTo(this.editGroup);
+    const link = (a, b, color) => L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { ...opts, color,
+      weight: 3, dashArray: '8 6' }).addTo(this.editGroup);
+    for (const e of edits) {
+      link(e.a, e.b, EDIT_COLORS[e.kind]);
+      pin(e.a, EDIT_COLORS[e.kind]);
+      pin(e.b, EDIT_COLORS[e.kind]);
+    }
+    if (draft.a && (draft.b || hover)) link(draft.a, draft.b ?? hover, COLORS.select);
+    for (const pt of [draft.a, draft.b]) if (pt) pin(pt, COLORS.select);
+    if (hover) {
+      L.circleMarker([hover.lat, hover.lon], { ...opts, radius: 8, color: COLORS.select, weight: 2,
+                                               fillOpacity: 0 }).addTo(this.editGroup);
+    }
+  }
+
+  /**
+   * Nearest point on any visible road.
+   * @param {L.LatLng} latlng
+   * @param {number} maxPx give up beyond this many screen pixels
+   * @returns {{lat: number, lon: number, name: string}|null}
+   */
+  nearestRoad(latlng, maxPx = 30) {
+    const at = this.map.latLngToLayerPoint(latlng);
+    let best = null;
+    let bestD = maxPx;
+    for (const e of this.edges.values()) {
+      if (!this.#visible(e)) continue;
+      const pts = e.line.map((ll) => this.map.latLngToLayerPoint(ll));
+      for (let i = 1; i < pts.length; i++) {
+        const c = L.LineUtil.closestPointOnSegment(at, pts[i - 1], pts[i]);
+        const d = c.distanceTo(at);
+        if (d < bestD) { bestD = d; best = { c, e }; }
+      }
+    }
+    if (!best) return null;
+    const ll = this.map.layerPointToLatLng(best.c);
+    return { lat: ll.lat, lon: ll.lng, name: best.e.p.name || best.e.p.road };
+  }
+
+  /**
+   * Fit the area and lock the view to it: no panning away, no zooming out past it.
+   * @param {[number, number, number, number]} bbox west, south, east, north
+   */
+  lock([w, s, e, n]) {
+    this.bounds = L.latLngBounds([[s, w], [n, e]]);
+    this.fitted = false;
+    this.relock(true);
+  }
+
+  /** Recompute the zoom limit (call after a resize); `fit` also resets the view. */
+  relock(fit = false) {
+    if (!this.bounds) return;
+    this.map.invalidateSize({ pan: false }); // the container may have been laid out since
+    const size = this.map.getSize();
+    if (size.x < 50 || size.y < 50) return; // not visible yet: the resize observer calls again
+    this.map.setMinZoom(0);
+    const z = this.map.getBoundsZoom(this.bounds, false, [16, 16]);
+    this.map.setMaxBounds(this.bounds.pad(0.04));
+    if (fit || !this.fitted || this.map.getZoom() < z) {
+      this.map.fitBounds(this.bounds, { padding: [16, 16], animate: false });
+    }
+    this.fitted = true;
+    this.map.setMinZoom(z);
+  }
+
+  /** Centre the view on a junction. @param {number} node node index */
+  focusNode(node) {
+    const n = this.nodes.get(node);
+    if (n) this.map.setView(n.latlng, Math.max(this.map.getZoom(), 17), { animate: false });
   }
 }

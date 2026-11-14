@@ -109,15 +109,30 @@
       <thead><tr><th>Junction</th><th>Delay s</th><th>Veh</th><th>Max queue</th></tr></thead>
       <tbody>
         {#each junctions as j}
-          <tr><td>{j.label}{j.signalised ? ' ●' : ''}</td><td>{num(j.delay_mean_s, 1)}</td><td>{j.vehicles}</td><td>{j.queue_max_veh}</td></tr>
+          <tr><td><button class="jn" title="Show on the map" onclick={() => (app.focusNode = j.node)}>{j.label}</button>
+            <span class="muted">{j.control === 'circle' ? 'circle' : j.signalised ? 'signal' : 'give way'}</span></td>
+            <td>{num(j.delay_mean_s, 1)}</td><td>{j.vehicles}</td><td>{j.queue_max_veh}</td></tr>
         {/each}
       </tbody>
     </table>
+    {#if app.result.info?.edit_usage?.length}
+      <h4>Scenario edits <span class="muted">(what the vehicles did)</span></h4>
+      <ul class="usage">
+        {#each app.result.info.edit_usage as u}
+          <li><b>{u.junction ? `${u.junction}: ` : ''}{u.label}</b><span>{u.text}</span></li>
+        {/each}
+      </ul>
+    {/if}
   {/if}
 </aside>
 
 <style>
   .metrics { overflow-y: auto; }
+  .jn { background: none; border: 0; padding: 0; color: var(--text); font: 600 12px var(--mono);
+        text-decoration: underline dotted; text-underline-offset: 3px; margin-right: 6px; }
+  .usage { list-style: none; margin: 0; padding: 0 16px 16px; display: grid; gap: 6px; font-size: 12.5px; }
+  .usage li { display: grid; gap: 1px; background: var(--panel-2); border-radius: 6px; padding: 6px 8px; }
+  .usage span { color: var(--muted); }
   .tabs { display: flex; gap: 4px; }
   .tabs button { background: none; border: 0; color: var(--muted); font-weight: 600; padding: 0 8px 0 0; }
   .tabs button.on { color: var(--text); }

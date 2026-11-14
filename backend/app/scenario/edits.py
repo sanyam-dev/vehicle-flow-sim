@@ -182,9 +182,9 @@ def add_lane(G: nx.MultiDiGraph, a: int, b: int, both_directions: bool) -> list[
         EditError: if no road connects the points or nothing can be widened.
     """
     paths = [_open_path(G, a, b)] + ([_open_path(G, b, a)] if both_directions else [])
-    if not paths[0]:
-        raise EditError("No road connects the two points in that direction, "
-                        "so no lane can be added between them.")
+    if not any(paths):
+        raise EditError("No road connects the two points" + ("" if both_directions else
+                        " from the first to the second") + ", so no lane can be added.")
     done = []
     for u, v, k in dict.fromkeys(e for path in paths for e in path):
         d = G.edges[u, v, k]

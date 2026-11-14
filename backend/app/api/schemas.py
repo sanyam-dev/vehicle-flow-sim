@@ -5,11 +5,13 @@ Both the chat endpoint and the hyper-parameter form produce one.
 """
 
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 TrafficLevel = Literal["less", "moderate", "high"]
+EdgeId = Annotated[str, Field(pattern=r"^\d{1,12}-\d{1,12}-\d{1,6}$")]
+SCENARIO_FIELDS = ("close_roads", "close_edges", "close_lanes", "map_edits", "junction_edits")
 _HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
@@ -25,6 +27,52 @@ class LaneClosure(BaseModel):
     lanes: list[int] = Field(default_factory=list, max_length=8)
 
 
+class MapPoint(BaseModel):
+    """A point the user clicked on the map (never produced by the LLM)."""
+
+    lat: float = Field(ge=-90.0, le=90.0)
+    lon: float = Field(ge=-180.0, le=180.0)
+
+
+class MapEdit(BaseModel):
+    """Map-editor edit between two clicked points.
+
+    Attributes:
+        kind: "flyover" / "underpass" (a new grade-separated road between the
+            points) or "add_lane" (one more lane along the roads joining them).
+        a, b: The two points; each snaps to the nearest road.
+        lanes: Lanes per direction of a new flyover / underpass.
+        both_directions: For "add_lane": also widen the way back.
+    """
+
+    kind: Literal["flyover", "underpass", "add_lane"]
+    a: MapPoint
+    b: MapPoint
+    lanes: int = Field(default=2, ge=1, le=4)
+    both_directions: bool = True
+
+    @model_validator(mode="after")
+    def _distinct_points(self):
+        """The two points must differ."""
+        if abs(self.a.lat - self.b.lat) < 1e-6 and abs(self.a.lon - self.b.lon) < 1e-6:
+            raise ValueError("the two points of a map edit must be different")
+        return self
+
+
+class JunctionEdit(BaseModel):
+    """Change how one junction is controlled.
+
+    Attributes:
+        node: Junction node id (`osm` of the junction in the network GeoJSON).
+        control: "signal" (fixed-time traffic light) or "circle" (roundabout).
+        stop_s: Red time per approach for a signal; None uses `signal_stop_s`.
+    """
+
+    node: str = Field(pattern=r"^\d{1,12}$")
+    control: Literal["signal", "circle"]
+    stop_s: float | None = Field(default=None, ge=10.0, le=180.0)
+
+
 class RunRequest(BaseModel):
     """One baseline (+ optional scenario) simulation job.
 
@@ -37,9 +85,12 @@ class RunRequest(BaseModel):
         warmup_s: Seconds excluded from metrics.
         seed: Fixed random seed.
         dt: Engine time step (s).
+        signal_stop_s: Red time per approach at every traffic signal (s).
         close_roads: Road-name fragments to close fully (scenario).
-        close_edges: Exact directed OSM edges "u-v-k" to close (scenario).
+        close_edges: Exact directed graph edges "u-v-k" to close (scenario).
         close_lanes: Partial lane closures (scenario).
+        map_edits: Flyovers, underpasses and extra lanes drawn on the map (scenario).
+        junction_edits: Junctions turned into a signal or a circle (scenario).
     """
 
     place: str = Field(default="Silk Board Junction, Bengaluru", min_length=2, max_length=160)
@@ -49,9 +100,12 @@ class RunRequest(BaseModel):
     warmup_s: float = Field(default=180.0, ge=0.0, le=900.0)
     seed: int = Field(default=42, ge=0, le=2**31 - 1)
     dt: float = Field(default=0.5, ge=0.1, le=1.0)
+    signal_stop_s: float = Field(default=45.0, ge=10.0, le=180.0)
     close_roads: list[str] = Field(default_factory=list, max_length=20)
-    close_edges: list[str] = Field(default_factory=list, max_length=200)
+    close_edges: list[EdgeId] = Field(default_factory=list, max_length=200)
     close_lanes: list[LaneClosure] = Field(default_factory=list, max_length=20)
+    map_edits: list[MapEdit] = Field(default_factory=list, max_length=10)
+    junction_edits: list[JunctionEdit] = Field(default_factory=list, max_length=50)
 
     @field_validator("time")
     @classmethod
@@ -70,7 +124,8 @@ class RunRequest(BaseModel):
     @property
     def has_scenario(self) -> bool:
         """True when any graph edit is requested."""
-        return bool(self.close_roads or self.close_edges or self.close_lanes)
+        return bool(self.close_roads or self.close_edges or self.close_lanes
+                    or self.map_edits or self.junction_edits)
 
 
 class ChatMessage(BaseModel):

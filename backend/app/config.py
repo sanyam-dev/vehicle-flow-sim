@@ -33,7 +33,8 @@ class Settings(BaseSettings):
             servers only; in production the frontend is served same-origin).
         static_dir: Built frontend (index.html + assets) served at "/" if present.
         seed_dir: Areas shipped with the app (graphs + geocoder rows), see geo/seed.py.
-        max_half_side_m: Area cap, half the side of the square bbox (m).
+        max_half_side_m: Area cap, half the side of the square bbox (m);
+            707 m gives the 2 km² maximum area.
         default_half_side_m: Area half-side used when geocoding a point.
         nominatim_url: Nominatim search endpoint.
         user_agent: Generic client name sent to OSM services.
@@ -70,7 +71,7 @@ class Settings(BaseSettings):
     static_dir: Path = _REPO_ROOT / "frontend" / "dist"
     seed_dir: Path = _REPO_ROOT / "backend" / "seed"
 
-    max_half_side_m: float = 1750.0
+    max_half_side_m: float = 707.0
     default_half_side_m: float = 700.0
     nominatim_url: str = "https://nominatim.openstreetmap.org/search"
     user_agent: str = "vehicle-flow-sim/0.1"

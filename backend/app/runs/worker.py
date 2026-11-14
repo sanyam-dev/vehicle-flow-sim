@@ -12,8 +12,8 @@ another user's runs. Rules:
   (the API answers 503 + Retry-After).
 
 `execute()` is the job run inside the worker: geocode, load the cached
-graph, apply scenario edits, run baseline + scenario in fast mode, and
-write everything to the run store.
+graph, apply scenario edits (`scenario.builder`), run baseline + scenario in
+fast mode, and write everything to the run store.
 """
 
 import multiprocessing as mp
@@ -167,24 +167,51 @@ def shutdown() -> None:
         _manager = None
 
 
-def _scenario_graph(G, req):
-    """Apply the request's closures to a copy of G (None if no edits)."""
-    from app.scenario.modifier import close_edges, close_lanes, edges_named, scenario_copy
+def _network_json(base_net, net, G, area_name: str) -> dict:
+    """Network GeoJSON of the run (scenario network, labelled against the baseline)."""
+    import json
 
-    if not req.has_scenario:
-        return None
-    Gs = scenario_copy(G)
-    for name in req.close_roads:
-        close_edges(Gs, edges_named(Gs, name))
-    keys = []
-    for s in req.close_edges:
-        u, v, k = (int(x) for x in s.split("-"))
-        if Gs.has_edge(u, v, k):
-            keys.append((u, v, k))
-    close_edges(Gs, keys)
-    for c in req.close_lanes:
-        close_lanes(Gs, edges_named(Gs, c.road), c.lanes or None)
-    return Gs
+    from app.runs.export import network_geojson
+    from app.sim.recorder import FrameRecorder
+
+    geo = network_geojson(net, FrameRecorder(net, None).origin, base_net)
+    geo["meta"]["area"] = area_name
+    if "bbox" in G.graph:
+        s, w, n, e = json.loads(G.graph["bbox"])
+        geo["meta"]["area_bbox"] = [w, s, e, n]
+    return geo
+
+
+def _simulate(run_id: str, req, G, area_name: str) -> dict:
+    """Build the graphs, write the network and run baseline (+ scenario).
+
+    Args:
+        run_id: Run id.
+        req: Validated RunRequest.
+        G: Cached road graph of the area.
+        area_name: Area label for the UI.
+    Returns:
+        run_pair() result with `info.area` and `info.edit_usage`.
+    """
+    from app.runs import store
+    from app.scenario.builder import build_graphs, edit_usage
+    from app.sim.engine import SimConfig
+    from app.sim.network import compile_network
+    from app.sim.runner import run_pair
+
+    d = store.run_dir(run_id)
+    G_base, Gs, manifest = build_graphs(G, req)
+    base_net = compile_network(G_base)
+    net = compile_network(Gs, base_net) if Gs is not None else base_net
+    store.write_json(d / "network.json", _network_json(base_net, net, G, area_name))
+    store.set_status(run_id, "running", "simulating")
+    cfg = SimConfig(duration_s=req.duration_s, warmup_s=req.warmup_s, dt=req.dt,
+                    seed=req.seed, signal_stop_s=req.signal_stop_s)
+    result = run_pair(G_base, Gs, req.traffic, req.hour, cfg, d)
+    result["info"]["area"] = area_name
+    if result["scenario"]:
+        result["info"]["edit_usage"] = edit_usage(manifest, net, result["scenario"])
+    return result
 
 
 def execute(run_id: str, request: dict) -> None:
@@ -194,11 +221,7 @@ def execute(run_id: str, request: dict) -> None:
     from app.geo.graph_builder import load_or_build
     from app.geo.overpass import OverpassUnavailable
     from app.runs import store
-    from app.runs.export import network_geojson
-    from app.sim.engine import SimConfig
-    from app.sim.network import compile_network
-    from app.sim.recorder import FrameRecorder
-    from app.sim.runner import run_pair
+    from app.scenario.edits import EditError
 
     d = store.run_dir(run_id)
     try:
@@ -207,20 +230,9 @@ def execute(run_id: str, request: dict) -> None:
         area = resolve_area(req.place)
         store.set_status(run_id, "running", "loading road network")
         G = load_or_build(area, on_stage=lambda s: store.set_status(run_id, "running", s))
-        Gs = _scenario_graph(G, req)
-        net = compile_network(Gs if Gs is not None else G)
-        origin = FrameRecorder(net, None).origin
-        geo = network_geojson(net, origin)
-        geo["meta"]["area"] = area.name
-        store.write_json(d / "network.json", geo)
-        store.set_status(run_id, "running", "simulating")
-        cfg = SimConfig(duration_s=req.duration_s, warmup_s=req.warmup_s,
-                        dt=req.dt, seed=req.seed)
-        result = run_pair(G, Gs, req.traffic, req.hour, cfg, d)
-        result["info"]["area"] = area.name
-        store.write_json(d / "result.json", result)
+        store.write_json(d / "result.json", _simulate(run_id, req, G, area.name))
         store.set_status(run_id, "done")
-    except OverpassUnavailable as exc:  # expected when OSM servers are down: plain message
+    except (OverpassUnavailable, EditError) as exc:  # expected failures: plain message
         store.set_status(run_id, "error", error=str(exc))
     except Exception as exc:  # report any failure to the UI instead of dying silently
         traceback.print_exc()

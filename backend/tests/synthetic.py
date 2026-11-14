@@ -4,6 +4,7 @@ import json
 
 import networkx as nx
 import numpy as np
+from pyproj import Transformer
 from shapely.geometry import LineString
 
 CRS = "EPSG:32643"  # UTM 43N (Bengaluru)
@@ -94,3 +95,18 @@ def grid(signal_centre: bool = True) -> nx.MultiDiGraph:
             road = (main if j == 1 and di else avenue if i == 1 and dj else side)
             _two_way(roads, n, stub, road)
     return make_graph(nodes, roads, signals=[11] if signal_centre else [])
+
+
+def latlon(x: float, y: float) -> dict:
+    """{"lat", "lon"} of a point given as metre offsets in the synthetic graphs."""
+    lon, lat = Transformer.from_crs(CRS, "EPSG:4326", always_xy=True).transform(X0 + x, Y0 + y)
+    return {"lat": lat, "lon": lon}
+
+
+def merge() -> nx.MultiDiGraph:
+    """A one-way main road joined by a one-way ramp at a shallow angle (no crossing)."""
+    nodes = {1: (0, 0), 2: (400, 0), 3: (800, 0), 4: (100, -120)}
+    roads = [(1, 2, {"highway": "primary", "lanes": 2}),
+             (2, 3, {"highway": "primary", "lanes": 2}),
+             (4, 2, {"highway": "primary_link", "lanes": 1})]
+    return make_graph(nodes, roads)

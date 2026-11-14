@@ -116,11 +116,11 @@ def progress(run_id: str, request: dict) -> float:
     Returns:
         0..1 progress over all variants of the run.
     """
+    from app.api.schemas import SCENARIO_FIELDS
     from app.sim.recorder import CHUNK_FRAMES
 
     d = run_dir(run_id)
-    n_var = 2 if (request.get("close_roads") or request.get("close_edges")
-                  or request.get("close_lanes")) else 1
+    n_var = 2 if any(request.get(k) for k in SCENARIO_FIELDS) else 1
     total = n_var * max(request["duration_s"] / CHUNK_FRAMES, 1.0)
     done = sum(len(list((d / v).glob("chunk_*.npz"))) for v in VARIANTS if (d / v).exists())
     return min(done / total, 1.0)

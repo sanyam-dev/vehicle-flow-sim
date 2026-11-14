@@ -10,12 +10,13 @@ import pytest
 
 from app.config import get_settings
 from app.runs import worker
+from tests import synthetic
 from tests.conftest import MISSING_PLACE, TEST_PLACE, dump
 
 SESSION_A = {"X-Session-Id": "session-aaaa-1111"}
 SESSION_B = {"X-Session-Id": "session-bbbb-2222"}
 QUICK = {"place": TEST_PLACE, "traffic": "moderate", "time": "09:00",
-         "duration_s": 180, "warmup_s": 60}
+         "duration_s": 360, "warmup_s": 60}
 
 
 def wait_done(client, run_id: str, timeout_s: float = 120.0) -> dict:
@@ -46,9 +47,17 @@ def test_health(client):
     assert client.get("/api/health").json() == {"ok": True}
 
 
-@pytest.mark.parametrize("patch", [{"time": "25:00"}, {"duration_s": 10},
-                                   {"traffic": "insane"}, {"place": ""},
-                                   {"close_lanes": [{"road": "x"}]}])
+POINT = {"lat": 12.9, "lon": 77.6}
+
+
+@pytest.mark.parametrize("patch", [
+    {"time": "25:00"}, {"duration_s": 10}, {"traffic": "insane"}, {"place": ""},
+    {"close_lanes": [{"road": "x"}]}, {"close_edges": ["not-an-edge"]},
+    {"signal_stop_s": 3}, {"junction_edits": [{"node": "J1", "control": "circle"}]},
+    {"junction_edits": [{"node": "11", "control": "stop sign"}]},
+    {"map_edits": [{"kind": "flyover", "a": POINT, "b": POINT}]},
+    {"map_edits": [{"kind": "tunnel", "a": POINT, "b": {"lat": 12.91, "lon": 77.6}}]},
+    {"map_edits": [{"kind": "flyover", "a": {"lat": 95.0, "lon": 77.6}, "b": POINT}]}])
 def test_invalid_run_requests_are_rejected(client, patch):
     r = client.post("/api/runs", json={**QUICK, **patch}, headers=SESSION_A)
     assert r.status_code == 422
@@ -82,7 +91,7 @@ def test_baseline_run_end_to_end(client):
     assert {"edge", "signal", "boundary"} <= kinds
 
     meta = client.get(f"/api/runs/{run_id}/baseline/meta").json()
-    assert meta["n_frames"] == 180 and meta["n_chunks"] == 3
+    assert meta["n_frames"] == 360 and meta["n_chunks"] == 6
     chunk = client.get(f"/api/runs/{run_id}/baseline/chunks/0").json()
     assert len(chunk["t"]) == 60 and len(chunk["off"]) == 61
     assert len(chunk["vid"]) == chunk["off"][-1] == len(chunk["x"])
@@ -102,6 +111,35 @@ def test_scenario_run_compares_with_baseline(client):
     closed = [f for f in client.get(f"/api/runs/{run_id}/network").json()["features"]
               if f["properties"].get("closed")]
     assert closed and all(f["properties"]["name"] == "Main Street" for f in closed)
+
+
+def test_map_and_junction_edits_run_and_report_usage(client):
+    """A flyover, an extra lane and a circle: the scenario runs and reports their use."""
+    step = synthetic.GRID_STEP_M
+    west, east = synthetic.latlon(-100.0, step), synthetic.latlon(2 * step + 100.0, step)
+    run_id = start(client, {**QUICK, "signal_stop_s": 30, "map_edits": [
+        {"kind": "flyover", "a": west, "b": east, "lanes": 1},
+        {"kind": "add_lane", "a": synthetic.latlon(step, -100.0),
+         "b": synthetic.latlon(step, 2 * step + 100.0), "both_directions": False}],
+        "junction_edits": [{"node": "11", "control": "circle"}]})
+    doc = wait_done(client, run_id)
+    assert doc["state"] == "done", dump(doc)
+    usage = {u["kind"]: u for u in doc["result"]["info"]["edit_usage"]}
+    assert set(usage) == {"flyover", "add_lane", "junction_circle"}
+    assert usage["flyover"]["vehicles"] > 0 and usage["junction_circle"]["junction"]
+    assert doc["result"]["signals"]["scenario"] and doc["result"]["comparison"]
+    feats = client.get(f"/api/runs/{run_id}/network").json()["features"]
+    props = [f["properties"] for f in feats]
+    assert sum(p.get("added", False) for p in props) == 2
+    assert any(p["kind"] == "roundabout" and p["base_kind"] == "signal" for p in props)
+    assert any(p["kind"] == "edge" and p["lanes"] == p["base_lanes"] + 1 for p in props)
+
+
+def test_edit_that_cannot_be_applied_reports_a_plain_error(client):
+    """An unknown junction ends the run with a readable message (no traceback)."""
+    doc = wait_done(client, start(client, {**QUICK, "junction_edits": [
+        {"node": "99999", "control": "signal"}]}))
+    assert doc["state"] == "error" and doc["error"] == "Junction 99999 does not exist in this area."
 
 
 def test_same_request_same_metrics(client):

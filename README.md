@@ -7,37 +7,6 @@ replays side by side, with the metrics compared.
 
 Live: <https://vfsim-994012978460.asia-south1.run.app>
 
-![Simulation architecture](simulation-architecture.png)
-
-## What it does
-
-- **Chat agent**: an LLM (self-hosted Ollama, `qwen3:8b`) turns the request into validated
-  parameters: place, traffic level, time of day and road closures.
-  - It never produces coordinates. Places are geocoded with Nominatim.
-  - If the LLM is unreachable, a keyword parser takes over.
-- **Real road networks**: roads come from OpenStreetMap through osmnx.
-  - If the public Overpass servers fail, the area is cut from roads-only Geofabrik extracts
-    covering all of India.
-  - Graphs are cached per area.
-  - The simulated area is capped at 2 km².
-- **Agent-based engine**: every vehicle (bike, auto, car, truck) is its own agent, with its
-  own route, maximum speed and size. Agents are stored as numpy arrays.
-  - Vehicles follow the car ahead with IDM and change lanes with MOBIL.
-  - Capacity emerges from the lane count. It is not hard-coded.
-  - Flyovers and underpasses are grade-separated.
-  - Every junction where turn paths cross gets a fixed-time signal.
-- **Map editor**:
-  - Close roads, single directions or single lanes.
-  - Draw a flyover, an underpass or an extra lane between two points.
-  - Turn any junction into a fixed-time signal or a roundabout.
-- **Metrics**: travel time, throughput, queue length, delay per junction and a speed heatmap,
-  each compared between baseline and scenario. The result also reports, for each edit, how
-  vehicles used it.
-
-## Architecture
-
-Language in, two seeded runs out, compared side by side.
-
 ```mermaid
 flowchart TD
   subgraph U[1 · Understand]
@@ -81,6 +50,35 @@ flowchart TD
   EB --> RS
   ES --> RS
 ```
+
+## What it does
+
+- **Chat agent**: an LLM (self-hosted Ollama, `qwen3:8b`) turns the request into validated
+  parameters: place, traffic level, time of day and road closures.
+  - It never produces coordinates. Places are geocoded with Nominatim.
+  - If the LLM is unreachable, a keyword parser takes over.
+- **Real road networks**: roads come from OpenStreetMap through osmnx.
+  - If the public Overpass servers fail, the area is cut from roads-only Geofabrik extracts
+    covering all of India.
+  - Graphs are cached per area.
+  - The simulated area is capped at 2 km².
+- **Agent-based engine**: every vehicle (bike, auto, car, truck) is its own agent, with its
+  own route, maximum speed and size. Agents are stored as numpy arrays.
+  - Vehicles follow the car ahead with IDM and change lanes with MOBIL.
+  - Capacity emerges from the lane count. It is not hard-coded.
+  - Flyovers and underpasses are grade-separated.
+  - Every junction where turn paths cross gets a fixed-time signal.
+- **Map editor**:
+  - Close roads, single directions or single lanes.
+  - Draw a flyover, an underpass or an extra lane between two points.
+  - Turn any junction into a fixed-time signal or a roundabout.
+- **Metrics**: travel time, throughput, queue length, delay per junction and a speed heatmap,
+  each compared between baseline and scenario. The result also reports, for each edit, how
+  vehicles used it.
+
+## Architecture
+
+Language in, two seeded runs out, compared side by side (diagram at the top).
 
 ### Flow in words
 

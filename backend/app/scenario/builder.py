@@ -30,8 +30,8 @@ def _apply_splits(G: nx.MultiDiGraph, req) -> tuple[nx.MultiDiGraph, list[tuple]
         return G, [], {}
     H, splits, pairs = G.copy(), {}, []
     for i, e in enumerate(req.map_edits, 1):
-        a = edits.resolve_point(H, e.a.lat, e.a.lon, splits)
-        b = edits.resolve_point(H, e.b.lat, e.b.lon, splits)
+        a, b = (edits.resolve_point(H, p.lat, p.lon, splits, p.grade, p.edge)
+                for p in (e.a, e.b))
         if a == b:
             raise edits.EditError(f"Map edit {i}: the two points are the same place.")
         pairs.append((a, b))

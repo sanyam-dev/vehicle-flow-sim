@@ -6,14 +6,14 @@ import pytest
 
 from app.api.schemas import RunRequest
 from app.scenario.builder import build_graphs, edit_usage
-from app.scenario.edits import EditError
+from app.scenario.edits import EditError, resolve_point
 from app.sim.engine import Engine, SimConfig
 from app.sim.movements import ROUNDABOUT_SPEED_MS
 from app.sim.network import PRIORITY, ROUNDABOUT, SIGNAL, compile_network
 from app.sim.ring import ring_state
 from app.sim.runner import od_rates, prepare_baseline, prepare_scenario, run_pair
 from app.sim.signals import RED, build_signal_plans, movement_states, phase_timing, red_time
-from tests.synthetic import GRID_STEP_M, grid, latlon, merge
+from tests.synthetic import GRID_STEP_M, _two_way, grid, latlon, make_graph, merge
 
 CFG = SimConfig(duration_s=600.0, warmup_s=60.0)
 # Mid-points of the west and east stubs of Main Street (row 1 of the grid).
@@ -205,3 +205,51 @@ def test_bad_edits_are_reported_plainly(G):
     near = latlon(-80.0, GRID_STEP_M)
     with pytest.raises(EditError, match="50 m"):
         build_graphs(G, req(map_edits=[{"kind": "underpass", "a": WEST, "b": near}]))
+
+
+def stacked():
+    """A two-way ground road (1-2) with a flyover (3-4) 3 m beside it, reaching further east."""
+    nodes = {1: (0, 0), 2: (800, 0), 3: (-200, 3), 4: (1000, 3)}
+    roads = []
+    _two_way(roads, 1, 2, {"highway": "primary", "lanes": 2})
+    _two_way(roads, 3, 4, {"highway": "trunk", "lanes": 2, "bridge": "yes", "layer": "1"})
+    return make_graph(nodes, roads)
+
+
+def _road_of(G, node: int) -> set:
+    """End nodes of the roads touching a (split) node."""
+    return set(G.predecessors(node)) | set(G.successors(node))
+
+
+@pytest.mark.parametrize(("choice", "road"), [
+    ({}, {1, 2}),                                  # no choice: the ground road
+    ({"grade": "road"}, {1, 2}),
+    ({"grade": "bridge"}, {3, 4}),
+    ({"edge": "3-4-0"}, {3, 4}),                   # the clicked edge wins
+    ({"edge": "77-78-0", "grade": "bridge"}, {3, 4}),  # stale edge id: the grade decides
+])
+def test_stacked_point_snaps_to_the_chosen_road(choice, road):
+    """Where a flyover runs over a road, the point goes where the user chose."""
+    G, pt = stacked(), latlon(400.0, 1.5)
+    node = resolve_point(G, pt["lat"], pt["lon"], {}, **choice)
+    assert _road_of(G, node) == road
+
+
+def test_point_off_every_ground_road_uses_the_flyover():
+    """Without a choice, a point near only a flyover still snaps to it."""
+    G, pt = stacked(), latlon(950.0, 3.0)
+    assert _road_of(G, resolve_point(G, pt["lat"], pt["lon"], {})) == {3, 4}
+    with pytest.raises(EditError, match="not on a road"):
+        resolve_point(G, pt["lat"], pt["lon"], {}, grade="road")
+    with pytest.raises(EditError, match="not on an underpass"):
+        resolve_point(G, pt["lat"], pt["lon"], {}, grade="underpass")
+
+
+def test_map_edit_request_carries_the_choice():
+    """A RunRequest point with grade + edge reaches the resolver."""
+    G = stacked()
+    a = {**latlon(400.0, 1.5), "grade": "bridge", "edge": "3-4-0"}
+    G_base, _, _ = build_graphs(G, req(map_edits=[
+        {"kind": "underpass", "a": a, "b": latlon(700.0, 0.0)}]))
+    new = max(G.nodes) + 1  # the first split node is point A's
+    assert _road_of(G_base, new) <= {3, 4}

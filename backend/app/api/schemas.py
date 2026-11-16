@@ -28,10 +28,20 @@ class LaneClosure(BaseModel):
 
 
 class MapPoint(BaseModel):
-    """A point the user clicked on the map (never produced by the LLM)."""
+    """A point the user clicked on the map (never produced by the LLM).
+
+    Attributes:
+        lat, lon: The point, already snapped to a road by the map.
+        grade: The level the user chose where roads are stacked ("road",
+            "bridge" for a flyover, "underpass"); None prefers the ground road.
+        edge: The chosen road's directed edge "u-v-k" in the network the user
+            clicked on; used when it still exists, else `grade` decides.
+    """
 
     lat: float = Field(ge=-90.0, le=90.0)
     lon: float = Field(ge=-180.0, le=180.0)
+    grade: Literal["road", "bridge", "underpass"] | None = None
+    edge: EdgeId | None = None
 
 
 class MapEdit(BaseModel):

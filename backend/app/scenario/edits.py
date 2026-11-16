@@ -20,6 +20,7 @@ from pyproj import Transformer
 from shapely.geometry import LineString, Point
 from shapely.ops import substring
 
+from app.geo.grade import GRADE_NAMES, edge_grade
 from app.geo.lanes import edge_lane_count
 
 EdgeKey = tuple[int, int, int]
@@ -92,31 +93,64 @@ def split_edge(G: nx.MultiDiGraph, edge: EdgeKey, xy: tuple[float, float],
     return new
 
 
-def resolve_point(G: nx.MultiDiGraph, lat: float, lon: float, splits: dict) -> int:
+def _candidates(G: nx.MultiDiGraph, splits: dict, grade: str | None,
+                edge: str | None) -> list[EdgeKey]:
+    """Edges a clicked point may snap to.
+
+    Args:
+        G: Graph (with the splits made so far).
+        splits: Split bookkeeping (see `split_edge`).
+        grade: Chosen level ("road" | "bridge" | "underpass"); None means "road".
+        edge: Chosen directed edge "u-v-k"; its current pieces win when it exists.
+    Returns:
+        The chosen edge's pieces, else every edge of the chosen grade.
+    """
+    if edge is not None:
+        u, v, k = (int(x) for x in edge.split("-"))
+        pieces = [e for e in expand((u, v, k), splits) if G.has_edge(*e)]
+        if pieces:
+            return pieces
+    want = grade or "road"
+    return [(u, v, k) for u, v, k, d in G.edges(keys=True, data=True)
+            if u != v and GRADE_NAMES[edge_grade(d)] == want]
+
+
+def _nearest(G: nx.MultiDiGraph, cands: list[EdgeKey], p: Point) -> tuple[float, EdgeKey] | None:
+    """(distance, edge) of the candidate nearest to `p`, or None beyond EDGE_SNAP_M."""
+    best = min(((edge_line(G, *e).distance(p), e) for e in cands), key=lambda t: t[0],
+               default=None)
+    return best if best is not None and best[0] <= EDGE_SNAP_M else None
+
+
+def resolve_point(G: nx.MultiDiGraph, lat: float, lon: float, splits: dict,
+                  grade: str | None = None, edge: str | None = None) -> int:
     """Graph node for a clicked point, splitting a road if needed (in place).
+
+    Where roads are stacked the user picks one (`edge` / `grade`); without a
+    choice the ground road wins, and only a point with no ground road nearby
+    snaps to a flyover or underpass.
 
     Args:
         G: Graph to modify.
         lat, lon: Clicked point in degrees.
         splits: Split bookkeeping (see `split_edge`).
+        grade: Chosen level ("road" | "bridge" | "underpass") or None.
+        edge: Chosen directed edge "u-v-k" or None.
     Returns:
-        Node id.
+        Node id (an end node of the road when the point is within NODE_SNAP_M of it).
     Raises:
-        EditError: if the point is further than EDGE_SNAP_M from every road.
+        EditError: if the point is further than EDGE_SNAP_M from every allowed road.
     """
     xy = to_xy(G, lat, lon)
-    ids = list(G.nodes)
-    pts = np.asarray([[G.nodes[n]["x"], G.nodes[n]["y"]] for n in ids], dtype=float)
-    dist = np.hypot(pts[:, 0] - xy[0], pts[:, 1] - xy[1])
-    if dist.min() <= NODE_SNAP_M:
-        return ids[int(dist.argmin())]
     p = Point(xy)
-    best = min(((edge_line(G, u, v, k).distance(p), (u, v, k))
-                for u, v, k in G.edges(keys=True) if u != v), key=lambda t: t[0])
-    if best[0] > EDGE_SNAP_M:
-        raise EditError(f"The point {lat:.5f}, {lon:.5f} is not on a road "
-                        f"(nearest road is {best[0]:.0f} m away).")
-    return split_edge(G, best[1], xy, splits)
+    found = _nearest(G, _candidates(G, splits, grade, edge), p)
+    if found is None and grade is None and edge is None:
+        found = _nearest(G, [e for e in G.edges(keys=True) if e[0] != e[1]], p)
+    if found is None:
+        level = {"bridge": "a flyover", "underpass": "an underpass"}.get(grade or "", "a road")
+        raise EditError(f"The point {lat:.5f}, {lon:.5f} is not on {level} "
+                        f"(nothing within {EDGE_SNAP_M:.0f} m).")
+    return split_edge(G, found[1], xy, splits)
 
 
 def add_grade_road(G: nx.MultiDiGraph, a: int, b: int, kind: str, lanes: int) -> list[EdgeKey]:

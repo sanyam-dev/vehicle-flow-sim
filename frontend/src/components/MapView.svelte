@@ -9,11 +9,13 @@
   import { NetworkLayer } from '../lib/maplayers.js';
   import { VehicleLayer } from '../lib/vehiclelayer.js';
   import { MapSync } from '../lib/mapsync.js';
+  import { unappliedEdits } from '../lib/runs.js';
   import { TOOL_ICONS } from '../lib/icons.js';
   import Legend from './Legend.svelte';
   import RoadEditor from './RoadEditor.svelte';
   import JunctionEditor from './JunctionEditor.svelte';
   import EditPanel from './EditPanel.svelte';
+  import PointChooser from './PointChooser.svelte';
 
   const SAT_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
@@ -26,6 +28,15 @@
   let sync = null;
   let selectedId = null;
   let hover = $state(null); // snapped road point under the cursor (edit mode)
+  let view = $state(0); // bumped on every pan / zoom
+  let litId = null; // edge highlighted for the chooser
+
+  // Option the stacked-road chooser currently points at, and where it sits on screen.
+  const chosen = $derived(app.choice ? app.choice.options[app.choice.index] : null);
+  const chooserAt = $derived.by(() => {
+    view; // re-place after pan / zoom
+    return chosen && map ? map.latLngToContainerPoint([chosen.lat, chosen.lon]) : null;
+  });
 
   const junctionCount = $derived(
     app.network?.features.filter((f) => ['signal', 'priority', 'roundabout'].includes(f.properties.kind)).length ?? 0);
@@ -46,12 +57,36 @@
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   });
 
-  /** Edit mode: take the clicked point (snapped to a road) as point A, then B. */
+  /**
+   * Edit mode: snap the click to a road. Where roads are stacked the user
+   * confirms one in the chooser (ground road preselected); else it is taken.
+   */
   function pick(latlng) {
-    const pt = netLayer.nearestRoad(latlng);
-    if (!pt) return;
+    const options = netLayer.roadsAt(latlng);
+    if (!options.length) return;
+    if (options.length === 1) place(options[0]);
+    else app.choice = { options, index: 0 };
+  }
+
+  /** Use a snapped point as point A, then B. */
+  function place(pt) {
+    app.choice = null;
     if (!app.draft.a || app.draft.b) app.draft = { a: pt, b: null };
     else app.draft = { a: app.draft.a, b: pt };
+  }
+
+  /** Keys while the stacked-road chooser is open: arrows choose, Enter confirms. */
+  function chooserKey(e) {
+    const c = app.choice;
+    if (!c) return false;
+    if (e.key === 'Escape') app.choice = null;
+    else if (e.key === 'Enter') place(c.options[c.index]);
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      app.choice = { ...c, index: (c.index + step + c.options.length) % c.options.length };
+    } else return false;
+    e.preventDefault();
+    return true;
   }
 
   /** A road was clicked: pick a point in edit mode, else open the road editor. */
@@ -80,13 +115,19 @@
       if (app.editMode) pick(e.latlng);
       else Object.assign(app, { selected: null, selectedNode: null });
     });
-    map.on('mousemove', (e) => { hover = app.editMode ? netLayer.nearestRoad(e.latlng) : null; });
+    map.on('mousemove', (e) => {
+      hover = app.editMode && !app.choice ? (netLayer.roadsAt(e.latlng)[0] ?? null) : null;
+    });
     map.on('mouseout', () => (hover = null));
+    map.on('move zoom', () => view++); // keeps the chooser next to its point
     sync = new MapSync(netLayer, vehicles);
     player.renderer = (g, s, t) => sync.render(g, s, t);
     const resize = new ResizeObserver(() => { map.invalidateSize({ pan: false }); netLayer.relock(); });
     resize.observe(container);
-    const esc = (e) => { if (e.key === 'Escape') Object.assign(app, { editMode: false, draft: { a: null, b: null } }); };
+    const esc = (e) => {
+      if (chooserKey(e)) return;
+      if (e.key === 'Escape') Object.assign(app, { editMode: false, draft: { a: null, b: null } });
+    };
     window.addEventListener('keydown', esc);
     ready = true;
     return () => { resize.disconnect(); window.removeEventListener('keydown', esc); };
@@ -142,22 +183,32 @@
 
   $effect(() => { if (ready) netLayer.setHeat(app.heat); });
 
-  // Closed roads: pending edits + (scenario view) the run's own closures.
+  // Closed roads: edits not yet run + (scenario view) the run's own closures.
+  // Edits the loaded run already applied are drawn from its network, per variant.
   $effect(() => {
-    const pending = app.edits.close_edges.slice();
+    const pending = unappliedEdits().close_edges;
     const showRun = app.variant === 'scenario';
     if (ready && app.network) sync.applyClosures(pending, showRun);
   });
 
-  // Pending map edits, the edit being drawn, and edited junctions.
+  // Map edits not yet run, the edit being drawn, and edited junctions.
   $effect(() => {
-    const edits = app.edits.map_edits.slice();
+    const todo = unappliedEdits();
+    const edits = todo.map_edits;
     const draft = { ...app.draft };
-    const ids = new Set(app.edits.junction_edits.map((j) => j.node));
-    const cursor = app.editMode && !(draft.a && draft.b) ? hover : null;
+    const ids = new Set(todo.junction_edits.map((j) => String(j.node)));
+    const cursor = chosen ?? (app.editMode && !(draft.a && draft.b) ? hover : null);
     if (!ready || !app.network) return;
     netLayer.setPreviews(edits, draft, cursor);
     netLayer.setNodeEdits(ids);
+  });
+
+  // Chooser: highlight the road its current option snaps to.
+  $effect(() => {
+    const id = chosen?.id ?? null;
+    if (!ready) return;
+    sync.select(id, litId);
+    litId = id;
   });
 
   // Selection highlight.
@@ -178,7 +229,7 @@
   });
 
   function toggleEdit() {
-    Object.assign(app, { editMode: !app.editMode, draft: { a: null, b: null },
+    Object.assign(app, { editMode: !app.editMode, draft: { a: null, b: null }, choice: null,
                          selected: null, selectedNode: null });
   }
 </script>
@@ -225,6 +276,11 @@
 
   {#if app.editMode}
     <EditPanel />
+    {#if app.choice && chooserAt}
+      <PointChooser options={app.choice.options} index={app.choice.index} x={chooserAt.x} y={chooserAt.y}
+                    onpick={(i) => (app.choice = { ...app.choice, index: i })}
+                    onconfirm={() => place(chosen)} oncancel={() => (app.choice = null)} />
+    {/if}
   {:else if app.selected}
     <RoadEditor />
   {:else if app.selectedNode}

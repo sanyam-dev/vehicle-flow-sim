@@ -111,9 +111,13 @@ export class NetworkLayer {
                    : f.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
     const opts = { renderer: this.r[GRADE_PANE[p.grade] ?? 'road'], interactive: false };
     const shadow = p.grade === 'bridge' ? L.polyline(line, opts).addTo(this.group) : null;
+    // Added / widened roads get a halo behind the casing, so the casing can keep
+    // its flyover / underpass colour while the change stays visible.
+    const changed = p.added || p.lanes !== p.base_lanes;
+    const halo = changed ? L.polyline(line, opts).addTo(this.group) : null;
     const casing = L.polyline(line, opts).addTo(this.group);
     const road = L.polyline(line, opts);
-    const e = { p, line, casing, road, shadow, r: null, closed: false, sel: false };
+    const e = { p, line, casing, road, shadow, halo, r: null, closed: false, sel: false };
     e.hit = L.polyline(line, { renderer: this.r.hit, opacity: 0, bubblingMouseEvents: false })
       .bindTooltip(roadTip(p), { sticky: true, className: 'map-tip', direction: 'top', offset: [0, -6] })
       .on('click', (ev) => this.#visible(e) && this.handlers.onEdge?.(p, ev.latlng));
@@ -171,12 +175,9 @@ export class NetworkLayer {
       : COLORS.roadMinor;
   }
 
-  /** Casing (outline) style: selection, scenario change, grade, or plain. */
+  /** Casing (outline) style: selection, grade, or plain (scenario changes use the halo). */
   #casing(e, w) {
-    const lanes = this.#lanes(e);
-    const changed = this.variant === 'scenario' && (e.p.added || lanes > (e.p.base_lanes || lanes));
     if (e.sel) return { color: COLORS.select, weight: w + 6, opacity: 0.7, dashArray: null };
-    if (changed) return { color: COLORS.edit, weight: w + 4, opacity: 1, dashArray: null };
     if (e.p.grade === 'bridge') return { color: COLORS.bridge, weight: w + 4, opacity: 1, dashArray: null };
     if (e.p.grade === 'underpass') {
       return { color: COLORS.underpass, weight: w + 4, opacity: 0.9, dashArray: '5 5' };
@@ -186,12 +187,14 @@ export class NetworkLayer {
 
   #styleEdge(e, z = this.map.getZoom(), mpp = metresPerPixel(z, this.map.getCenter().lat)) {
     if (!this.#visible(e)) {
-      for (const l of [e.casing, e.road, e.shadow]) l?.setStyle({ opacity: 0 });
+      for (const l of [e.casing, e.road, e.shadow, e.halo]) l?.setStyle({ opacity: 0 });
       return;
     }
     const minor = !MAJOR.has(e.p.highway) && !MID.has(e.p.highway);
     const w = Math.max(minor ? 0.8 : 1.6, (this.#lanes(e) * LANE_M) / mpp);
     e.shadow?.setStyle({ color: '#000', weight: w + 10, opacity: 0.35, lineCap: 'butt' });
+    e.halo?.setStyle({ color: COLORS.edit, weight: w + 9, lineCap: 'butt',
+                       opacity: this.variant === 'scenario' ? 0.9 : 0 });
     e.casing.setStyle({ ...this.#casing(e, w), lineCap: 'butt' });
     e.road.setStyle({ color: this.#fill(e), weight: w, opacity: 1, lineCap: 'butt',
                       dashArray: e.closed ? '4 4' : null });
@@ -344,28 +347,52 @@ export class NetworkLayer {
     }
   }
 
-  /**
-   * Nearest point on any visible road.
-   * @param {L.LatLng} latlng
-   * @param {number} maxPx give up beyond this many screen pixels
-   * @returns {{lat: number, lon: number, name: string}|null}
-   */
-  nearestRoad(latlng, maxPx = 30) {
-    const at = this.map.latLngToLayerPoint(latlng);
-    let best = null;
-    let bestD = maxPx;
-    for (const e of this.edges.values()) {
-      if (!this.#visible(e)) continue;
-      const pts = e.line.map((ll) => this.map.latLngToLayerPoint(ll));
-      for (let i = 1; i < pts.length; i++) {
-        const c = L.LineUtil.closestPointOnSegment(at, pts[i - 1], pts[i]);
-        const d = c.distanceTo(at);
-        if (d < bestD) { bestD = d; best = { c, e }; }
-      }
+  /** Closest point of an edge to a layer point: {c: L.Point, d: pixels}. */
+  #closest(e, at) {
+    const pts = e.line.map((ll) => this.map.latLngToLayerPoint(ll));
+    let best = { c: pts[0], d: Infinity };
+    for (let i = 1; i < pts.length; i++) {
+      const c = L.LineUtil.closestPointOnSegment(at, pts[i - 1], pts[i]);
+      const d = c.distanceTo(at);
+      if (d < best.d) best = { c, d };
     }
-    if (!best) return null;
-    const ll = this.map.layerPointToLatLng(best.c);
-    return { lat: ll.lat, lon: ll.lng, name: best.e.p.name || best.e.p.road };
+    return best;
+  }
+
+  /**
+   * Roads a clicked point can snap to, for the map editor.
+   *
+   * One option per stacked road: the nearest ground road, then each flyover
+   * and each underpass road within reach. The ground road comes first, so it
+   * is the default. Roads a scenario added are skipped (the backend resolves
+   * points before any new road exists).
+   * @param {L.LatLng} latlng clicked point
+   * @param {number} maxPx ignore roads further than this many screen pixels
+   * @param {number} stackM other levels count as stacked within this many metres
+   * @returns {{lat: number, lon: number, name: string, grade: string, uvk: string,
+   *            id: number}[]} options, default first ([] when no road is near)
+   */
+  roadsAt(latlng, maxPx = 30, stackM = 40) {
+    const at = this.map.latLngToLayerPoint(latlng);
+    const best = new Map(); // road key -> {c, d, e}
+    for (const e of this.edges.values()) {
+      if (e.p.added) continue;
+      const hit = this.#closest(e, at);
+      const key = e.p.grade === 'road' ? 'road' : `${e.p.grade}|${e.p.name || e.p.road}`;
+      if (hit.d <= maxPx && !(best.get(key)?.d <= hit.d)) best.set(key, { ...hit, e });
+    }
+    const nearest = Math.min(...[...best.values()].map((h) => h.d));
+    const rank = { road: 0, bridge: 1, underpass: 2 };
+    return [...best.values()]
+      .map(({ c, d, e }) => {
+        const ll = this.map.layerPointToLatLng(c);
+        return { d, m: this.map.distance(latlng, ll), lat: ll.lat, lon: ll.lng,
+                 name: e.p.name || e.p.road, grade: e.p.grade, uvk: e.p.uvk, id: e.p.edge };
+      })
+      .filter((o) => o.d === nearest || o.m <= stackM)
+      .sort((a, b) => rank[a.grade] - rank[b.grade] || a.d - b.d)
+      .slice(0, 4)
+      .map(({ d, m, ...o }) => o);
   }
 
   /**

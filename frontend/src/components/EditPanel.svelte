@@ -25,8 +25,11 @@
   }
 
   function close() {
-    Object.assign(app, { editMode: false, draft: { a: null, b: null } });
+    Object.assign(app, { editMode: false, draft: { a: null, b: null }, choice: null });
   }
+
+  /** "Name" for a ground road, "Name (flyover)" / "(underpass)" for the other levels. */
+  const pointLabel = (p) => p.name + ({ bridge: ' (flyover)', underpass: ' (underpass)' }[p.grade] ?? '');
 </script>
 
 <div class="editor" role="dialog" aria-label="Map editor">
@@ -36,9 +39,9 @@
   </div>
   <ol class="steps">
     <li class:done={!!a} class:now={!a}>
-      {a ? `Point A · ${a.name}` : 'Click the first point on a road'}</li>
+      {a ? `Point A · ${pointLabel(a)}` : 'Click the first point on a road'}</li>
     <li class:done={!!b} class:now={!!a && !b}>
-      {b ? `Point B · ${b.name}` : 'Click the second point on a road'}</li>
+      {b ? `Point B · ${pointLabel(b)}` : 'Click the second point on a road'}</li>
   </ol>
   {#if a && b}
     <div class="seg" role="radiogroup" aria-label="What to add">
@@ -61,10 +64,10 @@
     {#if full}<div class="err">A scenario holds at most 10 map edits.</div>{/if}
     <div class="row">
       <button class="btn primary" disabled={tooShort || full} onclick={add}>Add to scenario</button>
-      <button class="btn" onclick={() => (app.draft = { a: null, b: null })}>Pick again</button>
+      <button class="btn" onclick={() => Object.assign(app, { draft: { a: null, b: null }, choice: null })}>Pick again</button>
     </div>
   {:else}
-    <div class="hint">Clicks snap to the nearest road. Press Esc to stop.</div>
+    <div class="hint">Clicks snap to the nearest road; where a flyover or underpass is stacked on it you choose which. Press Esc to stop.</div>
   {/if}
   {#if app.edits.map_edits.length}
     <div class="hint">{app.edits.map_edits.length} map edit{app.edits.map_edits.length > 1 ? 's' : ''} pending ·

@@ -36,7 +36,8 @@ export const app = $state({
   selectedNode: null, // clicked junction properties
   focusNode: null, // node index the map should bring into view
   editMode: false, // pencil tool: the next two map clicks pick points
-  draft: { a: null, b: null }, // points picked so far: {lat, lon, name}
+  draft: { a: null, b: null }, // points picked so far: {lat, lon, name, grade, uvk, id}
+  choice: null, // stacked roads under a click: {options, index} until the user confirms one
   notice: '', // one-line message under the form (e.g. edits were cleared)
   satellite: false,
   heat: false, // full speed heatmap instead of "only where slow"

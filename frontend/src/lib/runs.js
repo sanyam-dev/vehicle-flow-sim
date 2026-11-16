@@ -22,6 +22,22 @@ export function runFromHash() {
 }
 
 /**
+ * A clicked point as sent to the backend: the snapped position plus the road
+ * the user chose there (`grade` and edge "u-v-k"), so stacked roads resolve
+ * to the right level. Accepts both a map point (`uvk`) and an echoed request (`edge`).
+ */
+const pointBody = (p) => ({ lat: p.lat, lon: p.lon, grade: p.grade ?? null,
+                            edge: p.uvk ?? p.edge ?? null });
+
+/** A map edit as sent to the backend (drops UI-only fields such as road names). */
+const mapEditBody = ({ kind, a, b, lanes, both_directions }) => (
+  { kind, lanes, both_directions, a: pointBody(a), b: pointBody(b) });
+
+/** A junction edit as sent to the backend. */
+const junctionEditBody = ({ node, control, stop_s }) => (
+  { node: String(node), control, stop_s: control === 'signal' ? stop_s : null });
+
+/**
  * Build the RunRequest body from form params + pending scenario edits.
  * @param {object} params place/traffic/time/duration_s/warmup_s/seed/dt
  */
@@ -29,11 +45,28 @@ export function buildRequest(params) {
   const e = app.edits;
   return { ...params, close_edges: [...e.close_edges], close_roads: [...e.close_roads],
            close_lanes: e.close_lanes.map((c) => ({ road: c.road, lanes: [...c.lanes] })),
-           map_edits: e.map_edits.map(({ kind, a, b, lanes, both_directions }) => (
-             { kind, lanes, both_directions, a: { lat: a.lat, lon: a.lon },
-               b: { lat: b.lat, lon: b.lon } })),
-           junction_edits: e.junction_edits.map(({ node, control, stop_s }) => (
-             { node, control, stop_s: control === 'signal' ? stop_s : null })) };
+           map_edits: e.map_edits.map(mapEditBody),
+           junction_edits: e.junction_edits.map(junctionEditBody) };
+}
+
+/**
+ * Pending edits that the loaded run does not include yet.
+ *
+ * Edits that the run already applied are drawn from the run's own network
+ * (the snapped flyover, the closed edge, the new circle), so the map must not
+ * also draw their pending preview on top.
+ * @returns {{close_edges: string[], map_edits: object[], junction_edits: object[]}}
+ */
+export function unappliedEdits() {
+  const run = app.request ?? {};
+  const e = app.edits;
+  const notIn = (list, body = (x) => x) => {
+    const done = new Set((list ?? []).map((x) => JSON.stringify(body(x))));
+    return (x) => !done.has(JSON.stringify(body(x)));
+  };
+  return { close_edges: e.close_edges.filter(notIn(run.close_edges)),
+           map_edits: e.map_edits.filter(notIn(run.map_edits, mapEditBody)),
+           junction_edits: e.junction_edits.filter(notIn(run.junction_edits, junctionEditBody)) };
 }
 
 /** Show the loaded run's parameters in the form. */
@@ -52,7 +85,7 @@ export async function startRun(request) {
   Object.assign(app.live, { count: 0, meanKmh: 0, stoppedShare: 0, minute: null });
   Object.assign(app, { status: 'queued', stage: 'submitting', progress: 0, error: '',
                        result: null, network: null, request, selected: null,
-                       selectedNode: null, editMode: false, draft: { a: null, b: null },
+                       selectedNode: null, editMode: false, draft: { a: null, b: null }, choice: null,
                        startedAt: Date.now() });
   try {
     const { id } = await api.createRun(request);
@@ -127,11 +160,17 @@ export async function poll(id, { forgetIfMissing = false } = {}) {
   }
 }
 
-/** Load result + frames of a finished run and start the replay. */
+/**
+ * Load result + frames of a finished run and start the replay.
+ *
+ * A run with edits opens on the scenario, so the edited network and the
+ * re-routed vehicles are what the user sees first (baseline is one click away).
+ */
 async function finish(id, result) {
   app.result = result;
-  app.variant = 'baseline';
-  await attachVariant('baseline', false);
+  const variant = result?.scenario ? 'scenario' : 'baseline';
+  app.variant = variant;
+  await attachVariant(variant, false);
   player.play();
 }
 
